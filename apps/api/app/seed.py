@@ -32,7 +32,7 @@ def seed_database(reset: bool = False) -> None:
     if db.query(User).first():
         db.close()
         return
-    org = Organization(name="JourneySync Demo Retail")
+    org = Organization(name="JourneySync AI Demo Retail")
     db.add(org)
     db.flush()
     users = [
@@ -121,7 +121,7 @@ def seed_database(reset: bool = False) -> None:
         db.add(AgentAssignment(ticket_id=ticket.id, agent_id=users[1].id))
         db.add(SentimentRecord(customer_id=customer.id, conversation_id=conv.id, sentiment=analysis.sentiment, score=-0.7 if analysis.sentiment == "negative" else 0.2))
         db.add(AISuggestion(conversation_id=conv.id, provider="mock", model="mock-deterministic", intent=analysis.intent, sentiment=analysis.sentiment, urgency=analysis.urgency, summary=analysis.summary, suggested_response=analysis.suggested_response, next_best_action=analysis.next_best_action, recommended_department=analysis.recommended_department, confidence=analysis.confidence, sources=analysis.sources, status="approved" if idx < 3 else "pending"))
-    db.add(AuditLog(user_id=users[0].id, action="seed_demo", model_provider="mock", confidence=1, explanation="Seeded JourneySync demo data."))
+    db.add(AuditLog(user_id=users[0].id, action="seed_demo", model_provider="mock", confidence=1, explanation="Seeded JourneySync AI demo data."))
     db.commit()
     db.close()
 

@@ -36,6 +36,8 @@ from .models import (
 from .schemas import KnowledgeCreate, LoginRequest, MessageCreate, SuggestionDecision
 from .seed import seed_database
 from .services import analytics_summary, analyze_text, chunk_document, create_ai_suggestion, route_case, search_knowledge
+from .email_sync import email_sync_loop
+from .email_providers import get_email_provider
 
 log = logging.getLogger("journeysync")
 
@@ -116,6 +118,7 @@ async def _startup() -> None:
     """Capture the running event loop for thread-safe WS broadcasting."""
     global _loop
     _loop = asyncio.get_running_loop()
+    asyncio.create_task(email_sync_loop())
     log.info("JourneySync AI started. WebSocket manager ready (%s sockets).", len(manager.active))
 
 
@@ -375,6 +378,19 @@ def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: 
     conv.priority = "high" if analysis.urgency == "high" else conv.priority
     db.add(AuditLog(user_id=user.id, action="message_created", explanation=f"Normalized {normalized.channel} message."))
     db.commit()
+    
+    if conv.channel.name == "email" and normalized.sender_type == "agent":
+        provider = get_email_provider()
+        thread_id = None
+        if conv.messages and conv.messages[0].metadata_json.get("thread_id"):
+            thread_id = conv.messages[0].metadata_json.get("thread_id")
+        try:
+            asyncio.run_coroutine_threadsafe(
+                provider.send_reply(conv.customer.email, conv.subject, normalized.body, thread_id),
+                _loop
+            )
+        except Exception as e:
+            log.error(f"Error sending email reply: {e}")
     # ── Broadcast ──────────────────────────────────────────────────────────────
     is_new = msg.id and len(conv.messages) == 1   # first message → created event
     event_type = "conversation.created" if is_new else "conversation.updated"
@@ -502,6 +518,20 @@ def approve_suggestion(suggestion_id: str, payload: SuggestionDecision, db: Sess
         explanation=suggestion.next_best_action,
     ))
     db.commit()
+    
+    conv = db.get(Conversation, suggestion.conversation_id)
+    if conv and conv.channel.name == "email":
+        provider = get_email_provider()
+        thread_id = None
+        if conv.messages and conv.messages[0].metadata_json.get("thread_id"):
+            thread_id = conv.messages[0].metadata_json.get("thread_id")
+        try:
+            asyncio.run_coroutine_threadsafe(
+                provider.send_reply(conv.customer.email, conv.subject, suggestion.edited_response, thread_id),
+                _loop
+            )
+        except Exception as e:
+            log.error(f"Error sending email reply: {e}")
     # ── Broadcast ──────────────────────────────────────────────────────────────
     manager.broadcast_sync("suggestion.updated", serialize(suggestion))
     conv = db.get(Conversation, suggestion.conversation_id)

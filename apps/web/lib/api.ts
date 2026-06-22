@@ -9,6 +9,7 @@ export type HealthStatus = {
   model: string;
   ollama_available: boolean;
   database_mode: string;
+  email_provider?: string;
 };
 
 export function getToken() {

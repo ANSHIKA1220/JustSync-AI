@@ -176,9 +176,11 @@ def get_ai_provider() -> AIProvider:
 
 def get_provider_status() -> dict[str, Any]:
     configured = settings.ai_provider.lower()
+    email_configured = settings.email_provider.lower()
     status: dict[str, Any] = {
         "configured_provider": configured,
         "active_provider": "mock" if configured == "mock" else configured,
+        "email_provider": email_configured,
         "fallback_active": False,
         "model": "mock-deterministic",
         "ollama_available": False,

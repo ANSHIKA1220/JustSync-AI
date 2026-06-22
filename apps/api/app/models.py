@@ -90,7 +90,19 @@ class Message(Base, TimestampMixin):
     body: Mapped[str] = mapped_column(Text)
     channel_name: Mapped[str] = mapped_column(String(60))
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    external_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    attachments: Mapped[list["Attachment"]] = relationship(back_populates="message", cascade="all,delete")
+
+class Attachment(Base, TimestampMixin):
+    __tablename__ = "attachments"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"))
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(120))
+    size: Mapped[int] = mapped_column(Integer)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    message: Mapped[Message] = relationship(back_populates="attachments")
 
 
 class SupportTicket(Base, TimestampMixin):
