@@ -1,7 +1,18 @@
+"""
+JourneySync AI – FastAPI application entry point.
+
+WebSocket endpoint /ws provides real-time push updates.  Every mutating REST
+endpoint calls manager.broadcast_sync() so connected clients receive typed
+event envelopes without polling.
+"""
+
+import asyncio
+import json
+import logging
 from datetime import datetime
 from time import time
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -9,7 +20,7 @@ from .adapters import ADAPTERS
 from .ai_providers import get_provider_status
 from .auth import create_access_token, current_user, require_roles, verify_password
 from .config import settings
-from .database import Base, engine, get_db
+from .database import Base, SessionLocal, engine, get_db
 from .models import (
     AISuggestion,
     AuditLog,
@@ -26,7 +37,12 @@ from .schemas import KnowledgeCreate, LoginRequest, MessageCreate, SuggestionDec
 from .seed import seed_database
 from .services import analytics_summary, analyze_text, chunk_document, create_ai_suggestion, route_case, search_knowledge
 
+log = logging.getLogger("journeysync")
+
+# ─── Database bootstrap ────────────────────────────────────────────────────────
 Base.metadata.create_all(bind=engine)
+
+# ─── FastAPI app + CORS ────────────────────────────────────────────────────────
 app = FastAPI(title="JourneySync AI API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -41,10 +57,71 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Rate limiting (in-memory, per-IP) ────────────────────────────────────────
 rate_buckets: dict[str, list[float]] = {}
 
+# ─── WebSocket infrastructure ─────────────────────────────────────────────────
+# The running event loop is captured at startup so synchronous endpoint
+# handlers can schedule async broadcasts via run_coroutine_threadsafe.
+_loop: asyncio.AbstractEventLoop | None = None
 
-def serialize(obj):
+
+class ConnectionManager:
+    """Holds all active WebSocket connections and fans out typed event envelopes."""
+
+    def __init__(self) -> None:
+        self.active: set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self.active.add(ws)
+
+    def disconnect(self, ws: WebSocket) -> None:
+        self.active.discard(ws)
+
+    async def broadcast(self, event_type: str, data: dict) -> None:
+        """Send ``{"type": event_type, "data": data}`` to every live socket."""
+        if not self.active:
+            return
+        payload = json.dumps({"type": event_type, "data": data}, default=str)
+        dead: set[WebSocket] = set()
+        for ws in set(self.active):          # copy – avoid mutation during iteration
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                dead.add(ws)
+        self.active -= dead
+
+    def broadcast_sync(self, event_type: str, data: dict) -> None:
+        """
+        Thread-safe broadcast from synchronous endpoint handlers.
+
+        FastAPI runs sync endpoints in a thread pool.  We schedule the async
+        broadcast on the captured event loop instead of blocking the thread.
+        """
+        if not self.active or _loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.broadcast(event_type, data), _loop)
+        except Exception:
+            pass  # Never crash the HTTP response path
+
+
+manager = ConnectionManager()
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Capture the running event loop for thread-safe WS broadcasting."""
+    global _loop
+    _loop = asyncio.get_running_loop()
+    log.info("JourneySync AI started. WebSocket manager ready (%s sockets).", len(manager.active))
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def serialize(obj) -> dict:
     data = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
     for key, value in list(data.items()):
         if isinstance(value, datetime):
@@ -52,7 +129,7 @@ def serialize(obj):
     return data
 
 
-def ai_rate_limit(request: Request):
+def ai_rate_limit(request: Request) -> None:
     key = request.client.host if request.client else "local"
     now = time()
     bucket = [t for t in rate_buckets.get(key, []) if now - t < 60]
@@ -61,6 +138,117 @@ def ai_rate_limit(request: Request):
     bucket.append(now)
     rate_buckets[key] = bucket
 
+
+def _authenticate_ws_token(token: str, db: Session) -> User | None:
+    """
+    Validate a JWT for a WebSocket connection.
+
+    Browsers cannot send the ``Authorization`` header during the WS handshake,
+    so the client passes its existing JWT as ``?token=<access_token>``.  We
+    reuse the same secret and algorithm as ``auth.py`` – nothing new is issued.
+    """
+    if not token:
+        return None
+    try:
+        from jose import jwt as jose_jwt
+        payload = jose_jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        email: str | None = payload.get("sub")
+        if not email:
+            return None
+        return db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+    except Exception:
+        return None
+
+
+def _serialize_conversation_detail(db: Session, conv: Conversation) -> dict:
+    """
+    Build the full conversation event payload.
+
+    Matches the shape returned by ``GET /conversations/{id}`` so the frontend
+    can reuse the same state-update path for both REST and WebSocket data.
+    """
+    db.refresh(conv)
+    data = serialize(conv)
+    data["customer"] = serialize(conv.customer)
+    data["profile"] = serialize(conv.customer.profile) if conv.customer.profile else None
+    data["channel"] = serialize(conv.channel)
+    data["messages"] = [serialize(m) for m in conv.messages]
+    suggestion = (
+        db.query(AISuggestion)
+        .filter(AISuggestion.conversation_id == conv.id)
+        .order_by(AISuggestion.created_at.desc())
+        .first()
+    )
+    data["ai_suggestion"] = serialize(suggestion) if suggestion else None
+    data["latest_message"] = conv.messages[-1].body if conv.messages else ""
+    return data
+
+
+# ─── WebSocket endpoint ───────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket, token: str = "") -> None:
+    """
+    Unified real-time channel.
+
+    Authentication
+    --------------
+    Pass the existing JWT as ``?token=<access_token>``.  No new token is
+    issued.  Invalid / missing tokens are rejected with close code 4001.
+
+    Protocol
+    --------
+    * On connect: server immediately pushes ``{"type": "provider.status", "data": {...}}``.
+    * Heartbeat: client sends the text ``"ping"`` every 30 s.
+      Server responds with ``{"type": "pong"}``.
+      If no ping is received within 35 s the server closes the stale socket.
+    * Mutations: server pushes typed envelopes:
+        ``conversation.created``, ``conversation.updated``,
+        ``ticket.updated``, ``suggestion.updated``,
+        ``analytics.updated``, ``provider.status``.
+
+    Reconnection
+    ------------
+    Handled entirely on the client side with exponential back-off.
+    """
+    # Auth – use a short-lived DB session for the token check only.
+    db = SessionLocal()
+    try:
+        user = _authenticate_ws_token(token, db)
+    finally:
+        db.close()
+
+    if user is None:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+
+    await manager.connect(ws)
+    try:
+        # Push initial provider status so the badge updates immediately.
+        await ws.send_text(
+            json.dumps({"type": "provider.status", "data": get_provider_status()})
+        )
+
+        # Heartbeat / keepalive loop.
+        # The client sends "ping" every 30 s; we wait up to 35 s before
+        # treating the connection as stale and closing it.
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=35.0)
+                if msg == "ping":
+                    await ws.send_text(json.dumps({"type": "pong"}))
+            except asyncio.TimeoutError:
+                # No ping received – stale connection.
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        manager.disconnect(ws)
+
+
+# ─── REST endpoints (unchanged behaviour, broadcasts added) ───────────────────
 
 @app.get("/health")
 def health():
@@ -187,6 +375,11 @@ def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: 
     conv.priority = "high" if analysis.urgency == "high" else conv.priority
     db.add(AuditLog(user_id=user.id, action="message_created", explanation=f"Normalized {normalized.channel} message."))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    is_new = msg.id and len(conv.messages) == 1   # first message → created event
+    event_type = "conversation.created" if is_new else "conversation.updated"
+    manager.broadcast_sync(event_type, _serialize_conversation_detail(db, conv))
+    manager.broadcast_sync("provider.status", get_provider_status())
     return {"conversation_id": conv.id, "message": serialize(msg), "analysis": analysis.model_dump()}
 
 
@@ -198,6 +391,9 @@ def resolve_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = D
     ticket.status = "resolved"
     db.add(AuditLog(user_id=user.id, action="ticket_resolved", explanation=ticket.title))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    manager.broadcast_sync("ticket.updated", {**serialize(ticket), "action": "resolved"})
+    manager.broadcast_sync("analytics.updated", analytics_summary(db))
     return serialize(ticket)
 
 
@@ -210,6 +406,9 @@ def escalate_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = 
     ticket.priority = "high"
     db.add(AuditLog(user_id=user.id, action="ticket_escalated", explanation=ticket.title, human_decision="escalated"))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    manager.broadcast_sync("ticket.updated", {**serialize(ticket), "action": "escalated"})
+    manager.broadcast_sync("analytics.updated", analytics_summary(db))
     return serialize(ticket)
 
 
@@ -303,6 +502,11 @@ def approve_suggestion(suggestion_id: str, payload: SuggestionDecision, db: Sess
         explanation=suggestion.next_best_action,
     ))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    manager.broadcast_sync("suggestion.updated", serialize(suggestion))
+    conv = db.get(Conversation, suggestion.conversation_id)
+    if conv:
+        manager.broadcast_sync("conversation.updated", _serialize_conversation_detail(db, conv))
     return serialize(suggestion)
 
 
@@ -314,6 +518,8 @@ def reject_suggestion(suggestion_id: str, db: Session = Depends(get_db), user: U
     suggestion.status = "rejected"
     db.add(AuditLog(user_id=user.id, action="ai_suggestion_rejected", model_provider=suggestion.provider, confidence=suggestion.confidence, human_decision="rejected", explanation="Agent rejected AI suggestion."))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    manager.broadcast_sync("suggestion.updated", serialize(suggestion))
     return serialize(suggestion)
 
 
@@ -350,6 +556,12 @@ def audit(db: Session = Depends(get_db), _: User = Depends(require_roles("admini
 @app.post("/demo/reset")
 def reset_demo(db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
     seed_database(reset=True)
+    # Use a fresh session – the previous one may be invalid after table drops.
+    fresh_db = SessionLocal()
+    try:
+        manager.broadcast_sync("analytics.updated", analytics_summary(fresh_db))
+    finally:
+        fresh_db.close()
     return {"ok": True}
 
 
@@ -367,4 +579,8 @@ def run_scenario(db: Session = Depends(get_db), user: User = Depends(require_rol
     suggestion = create_ai_suggestion(db, conv)
     db.add(AuditLog(user_id=user.id, action="guided_demo_scenario", model_provider=settings.ai_provider, confidence=suggestion.confidence, retrieved_sources=suggestion.sources, explanation="Created damaged-product escalation scenario."))
     db.commit()
+    # ── Broadcast ──────────────────────────────────────────────────────────────
+    manager.broadcast_sync("conversation.created", _serialize_conversation_detail(db, conv))
+    manager.broadcast_sync("analytics.updated", analytics_summary(db))
+    manager.broadcast_sync("provider.status", get_provider_status())
     return {"conversation_id": conv.id, "suggestion_id": suggestion.id}

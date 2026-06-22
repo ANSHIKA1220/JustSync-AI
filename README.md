@@ -69,6 +69,80 @@ flowchart LR
 - RAG fallback uses keyword/TF-IDF-style scoring and stores chunks in the database.
 - Guided demo scenario creates the damaged-delivery escalation flow and records AI and human actions.
 
+## WebSocket Architecture
+
+JourneySync AI uses a single persistent WebSocket connection per browser tab to push server events in real time, replacing all `setInterval` polling loops.
+
+### Connection
+
+```
+ws://localhost:8000/ws?token=<JWT>
+```
+
+Authentication reuses the existing JWT (passed as a query parameter because browsers cannot send `Authorization` headers during a WebSocket handshake).  No new token type is introduced.
+
+### Connection Lifecycle
+
+```
+Client mounts RealtimeProvider
+  └─ Opens WebSocket /ws?token=<JWT>
+       └─ Server authenticates token
+            ├─ Invalid → close(4001) – client does NOT reconnect
+            └─ Valid   → accept + push initial provider.status
+                              └─ Heartbeat loop:
+                                   Client sends "ping" every 30 s
+                                   Server replies {"type":"pong"}
+                                   No ping in 35 s → server closes stale socket
+                                   Unexpected close → client reconnects with
+                                     exponential back-off (1 s, 2 s, 4 s … max 10 s)
+```
+
+### Event Types
+
+| Type | Triggered by | Payload |
+|---|---|---|
+| `provider.status` | On connect; after message creation / demo scenario | `{ active_provider, fallback_active, model, … }` |
+| `conversation.created` | New message creates a conversation; demo scenario | Full conversation detail |
+| `conversation.updated` | New message; suggestion approved | Full conversation detail |
+| `ticket.updated` | Ticket resolved; ticket escalated | Ticket object + `action` field |
+| `suggestion.updated` | Suggestion approved; suggestion rejected | AI suggestion object |
+| `analytics.updated` | Ticket resolved/escalated; demo reset/scenario | Analytics summary |
+
+All events share the same envelope:
+
+```json
+{ "type": "conversation.updated", "data": { ... } }
+```
+
+### Frontend Architecture
+
+```
+RootLayout
+  └─ RealtimeProvider   (lib/ws.tsx – single WS connection)
+       ├─ InboxPage        calls useRealtime() → updates only changed row
+       ├─ WorkspacePage    calls useRealtime() → merges into conversation detail
+       │                                         preserves agent's draft edits
+       └─ AIProviderBadge  calls useRealtime() → badge updates on provider.status
+```
+
+`useRealtime(handlers)` registers event handlers without creating a new socket.  Handlers are stored in a `useRef` so the subscription is not re-created on every render.
+
+### Fallback Behaviour
+
+If the WebSocket is unavailable (API offline):
+1. The initial REST `GET /conversations` data renders normally.
+2. The WS connection attempt fails silently (one `console.debug` line).
+3. Reconnect back-off runs up to 20 attempts (~3 min) then stops.
+4. No console spam; no crash; no blank screen.
+
+### Developer Notes
+
+- Heartbeat interval: 30 s (client) / 35 s timeout (server).
+- Max reconnect attempts: 20 (with exponential back-off capped at 10 s).
+- Auth failure code 4001 permanently stops reconnection.
+- `ConnectionManager.broadcast_sync()` uses `asyncio.run_coroutine_threadsafe` to push from synchronous endpoint handlers into the async event loop without blocking.
+- `_loop` is captured at FastAPI startup; broadcasts silently no-op if the loop is unavailable (e.g. test mode).
+
 ## AI And RAG Workflow
 
 1. Incoming messages are normalized by channel adapters.

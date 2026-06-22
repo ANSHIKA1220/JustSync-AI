@@ -27,6 +27,8 @@ def headers():
     return {"Authorization": f"Bearer {token()}"}
 
 
+# ─── Existing REST tests (unchanged) ──────────────────────────────────────────
+
 def test_auth_and_role_authorization():
     assert client.post("/auth/login", json={"email": "agent@journeysync.demo", "password": "bad"}).status_code == 401
     assert client.get("/users", headers=headers()).status_code == 403
@@ -101,3 +103,50 @@ def test_real_provider_failure_falls_back_to_mock(monkeypatch):
         db.close()
     assert analysis.intent == "damaged_order"
     assert analysis.urgency == "high"
+
+
+# ─── WebSocket tests ──────────────────────────────────────────────────────────
+
+def test_websocket_connects_and_receives_provider_status():
+    """A valid JWT must yield an immediate provider.status envelope."""
+    tok = token()
+    with client.websocket_connect(f"/ws?token={tok}") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "provider.status", f"Unexpected first message: {msg}"
+        assert "data" in msg
+        assert "active_provider" in msg["data"]
+        assert "fallback_active" in msg["data"]
+
+
+def test_websocket_rejects_missing_token():
+    """Connection without a token must be closed with code 4001."""
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    # Starlette's TestClient raises WebSocketDisconnect on __enter__ when the
+    # server calls ws.close(4001) before accepting, so we assert on that.
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_json()  # Should not be reached
+    assert exc_info.value.code == 4001
+
+
+def test_websocket_rejects_invalid_token():
+    """A tampered token must be rejected with close code 4001."""
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws?token=not.a.valid.jwt") as ws:
+            ws.receive_json()  # Should not be reached
+    assert exc_info.value.code == 4001
+
+
+def test_websocket_ping_pong():
+    """Client ping must elicit a pong response."""
+    tok = token()
+    with client.websocket_connect(f"/ws?token={tok}") as ws:
+        # Consume the initial provider.status.
+        ws.receive_json()
+        # Send a ping.
+        ws.send_text("ping")
+        msg = ws.receive_json()
+        assert msg["type"] == "pong"

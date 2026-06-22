@@ -4,8 +4,9 @@ import { AppShell, PageTitle } from "@/components/app-shell";
 import { AIProviderBadge } from "@/components/provider-status";
 import { Badge, Button, Card, ConfidenceMeter, Select, StatusBadge, Textarea, Toast } from "@/components/ui";
 import { api } from "@/lib/api";
+import { useRealtime } from "@/lib/ws";
 import { Check, Clipboard, RefreshCw, Send, ShieldAlert, Wand2, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function WorkspacePage() {
   const [conversations, setConversations] = useState<any[]>([]);
@@ -18,43 +19,119 @@ export default function WorkspacePage() {
   const [processing, setProcessing] = useState("");
   const [rejectReason, setRejectReason] = useState("");
 
+  // Track whether the user has manually edited the AI draft so WebSocket
+  // updates don't silently overwrite unsaved edits.
+  const draftModifiedRef = useRef(false);
+
+  // Keep selectedId accessible inside WS event closures without stale captures.
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
+
+  // ── Initial data loads (REST) ───────────────────────────────────────────────
   const loadConversations = useCallback(async () => {
     const rows = await api<any[]>("/conversations");
     setConversations(rows);
-    if (!selectedId && rows.length) {
-      const browserParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("conversation") : null;
-      setSelectedId(browserParam || rows[0].id);
+    if (!selectedIdRef.current && rows.length) {
+      const param =
+        typeof window !== "undefined"
+          ? new URLSearchParams(window.location.search).get("conversation")
+          : null;
+      setSelectedId(param || rows[0].id);
     }
-  }, [selectedId]);
-
-  const loadDetail = useCallback(async (id: string, options: { preserveDraft?: boolean } = {}) => {
-    const detail = await api<any>(`/conversations/${id}`);
-    setSelected((current: any) => {
-      const isSameConversation = current?.id === detail.id;
-      if (!options.preserveDraft || !isSameConversation) {
-        setDraft(detail.ai_suggestion?.suggested_response || "");
-      }
-      return detail;
-    });
   }, []);
+
+  const loadDetail = useCallback(
+    async (id: string, options: { preserveDraft?: boolean } = {}) => {
+      const detail = await api<any>(`/conversations/${id}`);
+      setSelected((current: any) => {
+        const isSameConversation = current?.id === detail.id;
+        if (!options.preserveDraft || !isSameConversation) {
+          setDraft(detail.ai_suggestion?.suggested_response || "");
+          draftModifiedRef.current = false;
+        }
+        return detail;
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     loadConversations();
-    const interval = window.setInterval(loadConversations, 5000);
-    return () => window.clearInterval(interval);
   }, [loadConversations]);
 
   useEffect(() => {
     if (!selectedId) return;
     loadDetail(selectedId);
-    const interval = window.setInterval(() => loadDetail(selectedId, { preserveDraft: true }), 5000);
-    return () => window.clearInterval(interval);
-  }, [loadDetail, selectedId]);
+  }, [selectedId, loadDetail]);
+
+  // ── Real-time updates (WebSocket) ───────────────────────────────────────────
+  // Replaces two setInterval polling loops (conversations list + detail panel).
+  //
+  // Design decisions:
+  //   • conversation.created – prepend to list; auto-select if nothing is selected.
+  //   • conversation.updated – update the list row; merge into detail if selected.
+  //     Draft is NOT overwritten if the user has already edited it.
+  //   • suggestion.updated  – update just the suggestion sub-object in detail.
+  //   • ticket.updated      – no workspace UI surface; silently ignored.
+  useRealtime({
+    "conversation.created": (data) => {
+      const conv = data as any;
+      setConversations((prev) =>
+        prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]
+      );
+      if (!selectedIdRef.current) setSelectedId(conv.id);
+    },
+
+    "conversation.updated": (data) => {
+      const conv = data as any;
+
+      // 1. Keep the sidebar list row current.
+      setConversations((prev) =>
+        prev.some((c) => c.id === conv.id)
+          ? prev.map((c) => (c.id === conv.id ? { ...c, ...conv } : c))
+          : [conv, ...prev]
+      );
+
+      // 2. If this is the currently open conversation, merge into the detail panel.
+      if (conv.id !== selectedIdRef.current) return;
+
+      setSelected((current: any) => {
+        if (!current || current.id !== conv.id) return current;
+
+        // Merge all fields from the event into current state.
+        const next = { ...current, ...conv };
+
+        // Only update the draft textarea if the user hasn't typed anything yet.
+        // This preserves edits-in-progress across background WS refreshes.
+        if (!draftModifiedRef.current && conv.ai_suggestion?.suggested_response) {
+          setDraft(conv.ai_suggestion.suggested_response);
+        }
+
+        return next;
+      });
+    },
+
+    "suggestion.updated": (data) => {
+      const suggestion = data as any;
+      setSelected((current: any) => {
+        if (!current || current.ai_suggestion?.id !== suggestion.id) return current;
+        const next = { ...current, ai_suggestion: { ...current.ai_suggestion, ...suggestion } };
+        // If suggestion was just approved/rejected, the draft no longer needs guarding.
+        if (suggestion.status === "approved" || suggestion.status === "rejected") {
+          draftModifiedRef.current = false;
+        }
+        return next;
+      });
+    },
+  });
+
+  // ── User actions ────────────────────────────────────────────────────────────
 
   async function selectConversation(id: string) {
     setSelectedId(id);
     setComposer("");
     setToast("");
+    draftModifiedRef.current = false;
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", `/workspace?conversation=${id}`);
     }
@@ -64,8 +141,12 @@ export default function WorkspacePage() {
   async function approve() {
     if (!selected) return;
     setSending(true);
-    await api(`/ai/suggestions/${selected.ai_suggestion.id}/approve`, { method: "POST", body: JSON.stringify({ edited_response: draft }) });
+    await api(`/ai/suggestions/${selected.ai_suggestion.id}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ edited_response: draft }),
+    });
     setToast("Suggestion approved, sent, and recorded in audit log.");
+    draftModifiedRef.current = false;
     await loadDetail(selected.id);
     setSending(false);
   }
@@ -75,6 +156,7 @@ export default function WorkspacePage() {
     await api(`/ai/suggestions/${selected.ai_suggestion.id}/reject`, { method: "POST" });
     setToast(`Suggestion rejected and recorded${rejectReason ? `: ${rejectReason}` : "."}`);
     setRejectReason("");
+    draftModifiedRef.current = false;
     await loadDetail(selected.id);
   }
 
@@ -83,12 +165,14 @@ export default function WorkspacePage() {
     setProcessing("Analyzing intent → retrieving knowledge → generating response");
     const next = await api<any>(`/ai/conversations/${selected.id}/suggest`, { method: "POST", body: "{}" });
     setDraft(next.suggested_response);
+    draftModifiedRef.current = false;
     setToast("Suggestion regenerated with current provider settings.");
     await loadDetail(selected.id);
     setProcessing("");
   }
 
   function rewrite(mode: "shorter" | "empathetic" | "formal") {
+    draftModifiedRef.current = true;
     if (mode === "shorter") setDraft(draft.split(". ").slice(0, 2).join(". "));
     if (mode === "empathetic") setDraft(`I understand how frustrating this is. ${draft}`);
     if (mode === "formal") setDraft(`Thank you for contacting JourneySync support. ${draft}`);
@@ -129,6 +213,8 @@ export default function WorkspacePage() {
     }
   }
 
+  // ── Render ──────────────────────────────────────────────────────────────────
+
   return (
     <AppShell>
       <PageTitle title="Agent Workspace" subtitle="Three-column customer context, complete conversation, and responsible AI controls." />
@@ -156,7 +242,12 @@ export default function WorkspacePage() {
           <h2 className="mt-5 font-semibold">AI analysis</h2>{processing && <p className="mt-2 animate-pulse rounded-md bg-blush p-2 text-xs text-accent">{processing}</p>}<p className="mt-2 text-sm text-slate-600">{selected.ai_suggestion.summary}</p><div className="mt-3 grid grid-cols-2 gap-2 text-sm"><Badge>{selected.ai_suggestion.intent}</Badge><Badge>{selected.ai_suggestion.urgency}</Badge><Badge>{selected.ai_suggestion.recommended_department}</Badge><Badge>{selected.ai_suggestion.provider}</Badge></div><div className="mt-3"><ConfidenceMeter value={selected.ai_suggestion.confidence} /></div>
           <h2 className="mt-5 font-semibold">Suggested response</h2>
           <div className="mt-2 flex flex-wrap gap-2"><Button className="h-8 bg-white px-2 text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={copySuggestion}><Clipboard className="size-3" /> Copy</Button><Button className="h-8 bg-white px-2 text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={regenerate}><Wand2 className="size-3" /> Regenerate</Button><button className="rounded-full bg-slate-100 px-3 py-1 text-xs" onClick={() => rewrite("shorter")}>Shorter</button><button className="rounded-full bg-slate-100 px-3 py-1 text-xs" onClick={() => rewrite("empathetic")}>More empathetic</button><button className="rounded-full bg-slate-100 px-3 py-1 text-xs" onClick={() => rewrite("formal")}>More formal</button></div>
-          <Textarea className="mt-4 min-h-36 resize-y" value={draft} onChange={(e) => setDraft(e.target.value)} aria-label="Editable AI suggestion" />
+          <Textarea
+            className="mt-4 min-h-36 resize-y"
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); draftModifiedRef.current = true; }}
+            aria-label="Editable AI suggestion"
+          />
           {draft !== selected.ai_suggestion.suggested_response && <div className="mt-3 rounded-md bg-slate-50 p-3 text-xs text-slate-600"><b>Edited response comparison</b><p className="mt-1 line-clamp-2">Original: {selected.ai_suggestion.suggested_response}</p><p className="mt-1 line-clamp-2">Final: {draft}</p></div>}
           <p className="mt-2 text-xs text-slate-500">Human verification required before sending. Retrieved sources are advisory.</p>
           <div className="mt-3 grid gap-2"><div className="flex flex-wrap gap-2"><Button onClick={approve} disabled={sending}><Check className="size-4" /> Approve and Send</Button><Button className="bg-white text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={() => setToast("Draft saved locally for this session.")}>Save as Draft</Button><Button className="bg-white text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={() => setToast("Case escalated to priority queue.")}>Escalate</Button><Button className="bg-white text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={() => setToast("Conversation marked resolved for demo.")}>Resolve</Button></div><Select value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} aria-label="Reject reason"><option value="">Optional rejection reason</option><option>Incorrect policy</option><option>Tone not appropriate</option><option>Missing customer context</option></Select><Button className="bg-white text-ink ring-1 ring-slate-200 hover:bg-slate-50" onClick={reject}><X className="size-4" /> Reject Suggestion</Button></div>

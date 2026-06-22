@@ -3,6 +3,7 @@
 import { AppShell, PageTitle } from "@/components/app-shell";
 import { Badge, Card, Input, Select } from "@/components/ui";
 import { api } from "@/lib/api";
+import { useRealtime } from "@/lib/ws";
 import { Mail, MessageSquare, Smartphone, Store } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -12,18 +13,43 @@ const iconMap: Record<string, any> = { email: Mail, web_chat: MessageSquare, mob
 export default function InboxPage() {
   const [rows, setRows] = useState<any[]>([]);
   const [filters, setFilters] = useState({ q: "", channel: "", sentiment: "", priority: "" });
+
+  // ── Initial data load (REST) ────────────────────────────────────────────────
   useEffect(() => {
-    const load = () => api<any[]>("/conversations").then(setRows);
-    load();
-    const interval = window.setInterval(load, 5000);
-    return () => window.clearInterval(interval);
+    api<any[]>("/conversations").then(setRows).catch(() => undefined);
   }, []);
+
+  // ── Real-time updates (WebSocket) ───────────────────────────────────────────
+  // Replaces the previous setInterval polling loop.
+  // Each event updates only the affected conversation row – no full reload.
+  useRealtime({
+    "conversation.created": (data) => {
+      const conv = data as any;
+      setRows((prev) =>
+        prev.some((r) => r.id === conv.id) ? prev : [conv, ...prev]
+      );
+    },
+    "conversation.updated": (data) => {
+      const conv = data as any;
+      setRows((prev) =>
+        prev.some((r) => r.id === conv.id)
+          ? prev.map((r) => (r.id === conv.id ? { ...r, ...conv } : r))
+          : [conv, ...prev]  // also handles late-arriving creates
+      );
+    },
+    "conversation.deleted": (data) => {
+      const conv = data as any;
+      setRows((prev) => prev.filter((r) => r.id !== conv.id));
+    },
+  });
+
   const filtered = useMemo(() => rows.filter((row) =>
     (!filters.q || `${row.subject} ${row.customer.name}`.toLowerCase().includes(filters.q.toLowerCase())) &&
     (!filters.channel || row.channel.name === filters.channel) &&
     (!filters.sentiment || row.sentiment === filters.sentiment) &&
     (!filters.priority || row.priority === filters.priority)
   ), [rows, filters]);
+
   return (
     <AppShell>
       <PageTitle title="Unified Inbox" subtitle="Search, filter, and sort conversations across simulated channels." />
