@@ -1,7 +1,7 @@
 import base64
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import List
 
 import httpx
 from pydantic import BaseModel

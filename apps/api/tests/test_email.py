@@ -1,7 +1,5 @@
-import os
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from app.database import SessionLocal
 from app.models import Customer, Conversation, Message, Attachment

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from datetime import datetime
 
 from .database import SessionLocal
 from .email_providers import MockEmailProvider, get_email_provider
