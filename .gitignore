@@ -52,3 +52,10 @@ outputs/*
 Thumbs.db
 .vscode/
 .idea/
+
+apps/api/vector_store_data/
+
+rename.py
+reverse_rename.py
+search_res.txt
+search_results.json

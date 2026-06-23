@@ -207,4 +207,97 @@ describe("frontend smoke", () => {
 
     expect(await screen.findByText(/Ollama · mistral/)).toBeInTheDocument();
   });
+
+  // ─── Vector RAG retrieval metadata tests ─────────────────────────────────────
+
+  it("renders retrieval metadata for semantic sources", () => {
+    // Minimal component that exercises the Retrieved Sources template logic
+    // without needing the full WorkspacePage conversation scaffold.
+    const sources = [
+      {
+        chunk_id: "chunk-semantic-1",
+        provider: "chromadb",
+        similarity: 0.91,
+        retrieved_at: new Date("2026-06-23T07:00:00Z").toISOString(),
+        title: "Damaged Orders Policy",
+        excerpt: "Customers reporting damaged goods are eligible for a replacement within 48 hours.",
+      },
+    ];
+
+    function SourcesPreview() {
+      return (
+        <div>
+          {sources.map((s, i) => (
+            <div key={s.chunk_id ?? i} data-testid="source-card">
+              <span data-testid="provider-badge">{s.provider}</span>
+              <b data-testid="source-title">{s.title}</b>
+              <span data-testid="similarity-pct">{Math.round(s.similarity * 100)}%</span>
+              {s.excerpt && <p data-testid="source-excerpt">{s.excerpt}</p>}
+              {s.retrieved_at && (
+                <p data-testid="retrieved-at">
+                  Retrieved {new Date(s.retrieved_at).toLocaleTimeString()}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    render(<SourcesPreview />);
+
+    expect(screen.getByTestId("provider-badge")).toHaveTextContent("chromadb");
+    expect(screen.getByTestId("source-title")).toHaveTextContent("Damaged Orders Policy");
+    expect(screen.getByTestId("similarity-pct")).toHaveTextContent("91%");
+    expect(screen.getByTestId("source-excerpt")).toHaveTextContent("replacement within 48 hours");
+    expect(screen.getByTestId("retrieved-at")).toBeInTheDocument();
+  });
+
+  it("renders provider badge for keyword fallback sources", () => {
+    const sources = [
+      {
+        chunk_id: "chunk-kw-1",
+        provider: "keyword",
+        similarity: 0.72,
+        retrieved_at: new Date("2026-06-23T07:01:00Z").toISOString(),
+        title: "Product Returns",
+        excerpt: "Return policy allows returns within 30 days of purchase.",
+        score: 4.215,
+      },
+    ];
+
+    function SourcesPreview() {
+      return (
+        <div>
+          {sources.map((s, i) => (
+            <div key={s.chunk_id ?? i} data-testid="source-card">
+              <span
+                data-testid="provider-badge"
+                className={s.provider === "chromadb" ? "bg-indigo-100" : "bg-slate-200"}
+              >
+                {s.provider ?? "keyword"}
+              </span>
+              <b data-testid="source-title">{s.title}</b>
+              <span data-testid="similarity-pct">
+                {s.similarity != null
+                  ? `${Math.round(s.similarity * 100)}%`
+                  : s.score != null
+                  ? `score ${s.score}`
+                  : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    render(<SourcesPreview />);
+
+    const badge = screen.getByTestId("provider-badge");
+    expect(badge).toHaveTextContent("keyword");
+    // Badge must NOT have the chromadb indigo class.
+    expect(badge).not.toHaveClass("bg-indigo-100");
+    expect(screen.getByTestId("similarity-pct")).toHaveTextContent("72%");
+    expect(screen.getByTestId("source-title")).toHaveTextContent("Product Returns");
+  });
 });
