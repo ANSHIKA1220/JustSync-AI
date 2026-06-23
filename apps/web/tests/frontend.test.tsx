@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/dashboard/page";
 import LoginPage from "@/app/login/page";
@@ -15,6 +15,9 @@ vi.mock("next/navigation", () => ({
 
 describe("frontend smoke", () => {
   beforeEach(() => {
+    delete process.env.NEXT_PUBLIC_DEMO_MODE;
+    delete process.env.NEXT_PUBLIC_SEED_DEMO_DATA;
+    delete process.env.SEED_DEMO_DATA;
     localStorage.setItem("journeysync_token", "test-token");
     vi.stubGlobal("ResizeObserver", class {
       observe() {}
@@ -25,6 +28,8 @@ describe("frontend smoke", () => {
       const url = String(input);
       const payload = url.includes("/health")
         ? { status: "healthy", configured_provider: "gemini", active_provider: "mock", fallback_active: true, model: "mock-deterministic", ollama_available: false, database_mode: "sqlite" }
+        : url.includes("/auth/signup")
+          ? { access_token: "new-token", user: { id: "u2", email: "admin@acme.example", name: "Acme Admin", role: "administrator" }, organization: { id: "o2", name: "Acme CX", slug: "acme-cx", plan: "trial", status: "active", workspaces: [] } }
         : url.includes("/organization")
           ? { id: "o1", name: "JourneySync Demo Retail", slug: "journeysync-demo-retail", plan: "enterprise_trial", status: "active", workspaces: [{ id: "w1", organization_id: "o1", name: "Customer Operations", slug: "customer-operations", is_default: true }] }
           : url.endsWith("/users")
@@ -50,6 +55,26 @@ describe("frontend smoke", () => {
     await userEvent.click(screen.getByText("Administrator"));
     expect(screen.getByLabelText("Email")).toHaveValue("admin@journeysync.demo");
     expect(screen.getByLabelText("Password")).toHaveValue("Admin123!");
+  });
+
+  it("hides seeded credentials and creates organizations in production mode", async () => {
+    process.env.NEXT_PUBLIC_DEMO_MODE = "false";
+    const user = userEvent.setup();
+    render(<LoginPage />);
+    expect(screen.queryByText("Support Agent")).not.toBeInTheDocument();
+    expect(screen.getByText("Create your JourneySync organization")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Organization"), "Acme CX");
+    await user.type(screen.getByLabelText("Your name"), "Acme Admin");
+    await user.type(screen.getByLabelText("Work email"), "admin@acme.example");
+    await user.type(screen.getByLabelText("Password"), "StrongPass123!");
+    const createButtons = screen.getAllByRole("button", { name: "Create organization" });
+    await user.click(createButtons[createButtons.length - 1]);
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/signup"), expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ organization_name: "Acme CX", name: "Acme Admin", email: "admin@acme.example", password: "StrongPass123!" })
+      }));
+    });
   });
 
   it("renders customer journey stages", () => {

@@ -30,6 +30,7 @@ For this deployment profile:
 - Keep `SEED_DEMO_DATA=false` for production-like environments.
 - Use the Cloudflare Pages URL as `FRONTEND_URL` and in `CORS_ORIGINS`.
 - Use the Render backend URL as `NEXT_PUBLIC_API_URL` when building the frontend.
+- Set `NEXT_PUBLIC_DEMO_MODE=false` for deployed frontends so seeded demo credentials are hidden.
 
 ## Database And Migrations
 
@@ -81,6 +82,7 @@ Recommended settings:
 - Build command: `npm ci && npm run build`
 - Output directory: `out`
 - Environment variable: `NEXT_PUBLIC_API_URL=https://justsync-ai.onrender.com`
+- Environment variable: `NEXT_PUBLIC_DEMO_MODE=false`
 
 The app has no API routes, middleware, Server Actions, SSR-only data access, or runtime-dependent route handlers, so Cloudflare Pages can deploy it as a static Next.js export. Cloudflare Pages injects `CF_PAGES=1`; `apps/web/next.config.ts` uses that to emit the static `out` directory while keeping the local Docker standalone build unchanged.
 
