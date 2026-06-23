@@ -9,6 +9,7 @@ os.environ["AI_PROVIDER"] = "mock"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import Settings  # noqa: E402
+from app.database import sqlalchemy_url  # noqa: E402
 from app.main import app  # noqa: E402
 from app.seed import seed_database  # noqa: E402
 
@@ -75,6 +76,11 @@ def test_production_settings_require_safe_values():
             jwt_secret="prod-secret",
             seed_demo_data=True,
         )
+
+
+def test_plain_postgresql_url_uses_installed_psycopg_driver():
+    assert sqlalchemy_url("postgresql://user:pass@db:5432/app") == "postgresql+psycopg://user:pass@db:5432/app"
+    assert sqlalchemy_url("postgresql+psycopg://user:pass@db:5432/app") == "postgresql+psycopg://user:pass@db:5432/app"
 
 
 def test_signup_invite_and_tenant_isolation():
