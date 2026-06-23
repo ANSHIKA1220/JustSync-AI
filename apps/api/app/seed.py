@@ -19,6 +19,7 @@ from .models import (
     SentimentRecord,
     SupportTicket,
     User,
+    Workspace,
 )
 from .services import analyze_text, chunk_document
 
@@ -32,9 +33,10 @@ def seed_database(reset: bool = False) -> None:
     if db.query(User).first():
         db.close()
         return
-    org = Organization(name="JourneySync Demo Retail")
+    org = Organization(name="JourneySync Demo Retail", slug="journeysync-demo-retail", plan="enterprise_trial")
     db.add(org)
     db.flush()
+    db.add(Workspace(organization_id=org.id, name="Customer Operations", slug="customer-operations", is_default=True))
     users = [
         User(organization_id=org.id, email="admin@journeysync.demo", name="Avery Admin", role="administrator", hashed_password=hash_password("Admin123!")),
         User(organization_id=org.id, email="agent@journeysync.demo", name="Sam Support", role="agent", hashed_password=hash_password("Agent123!")),
@@ -79,17 +81,17 @@ def seed_database(reset: bool = False) -> None:
         ("Escalation Policy", "High urgency, negative sentiment, high-value customers, or churn risk above 0.75 should be escalated to a senior queue or relevant specialist team."),
     ]
     for title, content in docs:
-        doc = KnowledgeDocument(title=title, content=content, status="pending")
+        doc = KnowledgeDocument(organization_id=org.id, title=title, content=content, status="pending")
         db.add(doc)
         db.flush()
         chunk_document(db, doc)
     rules = [
-        RoutingRule(name="Refund to billing and returns", intent="refund_request", department="Billing and Returns"),
-        RoutingRule(name="Account access to technical support", intent="account_access", department="Technical Support"),
-        RoutingRule(name="High-value negative to senior retention", sentiment="negative", loyalty_tier="Platinum", department="Senior Retention Agent"),
-        RoutingRule(name="High urgency priority queue", urgency="high", department="Priority Queue"),
-        RoutingRule(name="Churn risk retention", churn_risk_min=0.75, department="Retention Team"),
-        RoutingRule(name="Damaged delivery logistics", intent="damaged_order", department="Logistics and Returns"),
+        RoutingRule(organization_id=org.id, name="Refund to billing and returns", intent="refund_request", department="Billing and Returns"),
+        RoutingRule(organization_id=org.id, name="Account access to technical support", intent="account_access", department="Technical Support"),
+        RoutingRule(organization_id=org.id, name="High-value negative to senior retention", sentiment="negative", loyalty_tier="Platinum", department="Senior Retention Agent"),
+        RoutingRule(organization_id=org.id, name="High urgency priority queue", urgency="high", department="Priority Queue"),
+        RoutingRule(organization_id=org.id, name="Churn risk retention", churn_risk_min=0.75, department="Retention Team"),
+        RoutingRule(organization_id=org.id, name="Damaged delivery logistics", intent="damaged_order", department="Logistics and Returns"),
     ]
     db.add_all(rules)
     db.flush()
@@ -108,20 +110,20 @@ def seed_database(reset: bool = False) -> None:
         customer = customer_objs[idx]
         channel = next(c for c in channels if c.name == channel_name)
         analysis = analyze_text(db, customer_body, customer)
-        conv = Conversation(customer_id=customer.id, channel_id=channel.id, subject=subject, priority="high" if analysis.urgency == "high" else "medium", sentiment=analysis.sentiment, unread=idx % 2 == 0, sla_risk=idx in (0, 7))
+        conv = Conversation(organization_id=org.id, customer_id=customer.id, channel_id=channel.id, subject=subject, priority="high" if analysis.urgency == "high" else "medium", sentiment=analysis.sentiment, unread=idx % 2 == 0, sla_risk=idx in (0, 7))
         conv.created_at = now - timedelta(days=10 - idx)
         db.add(conv)
         db.flush()
         bodies = [customer_body, agent_body, f"Follow-up for {subject.lower()} with customer context retained.", "Thank you for checking. Please keep me posted."]
         for j, body in enumerate(bodies):
             db.add(Message(conversation_id=conv.id, sender_type="customer" if j in (0, 3) else "agent", body=body, channel_name=channel_name, created_at=conv.created_at + timedelta(minutes=j * 12)))
-        ticket = SupportTicket(conversation_id=conv.id, customer_id=customer.id, title=subject, status="open" if idx % 3 else "resolved", priority=conv.priority, department=analysis.recommended_department, first_response_minutes=5 + idx * 3, resolution_minutes=45 + idx * 24, escalated=idx in (0, 5, 7), channel_name=channel_name)
+        ticket = SupportTicket(organization_id=org.id, conversation_id=conv.id, customer_id=customer.id, title=subject, status="open" if idx % 3 else "resolved", priority=conv.priority, department=analysis.recommended_department, first_response_minutes=5 + idx * 3, resolution_minutes=45 + idx * 24, escalated=idx in (0, 5, 7), channel_name=channel_name)
         db.add(ticket)
         db.flush()
         db.add(AgentAssignment(ticket_id=ticket.id, agent_id=users[1].id))
         db.add(SentimentRecord(customer_id=customer.id, conversation_id=conv.id, sentiment=analysis.sentiment, score=-0.7 if analysis.sentiment == "negative" else 0.2))
         db.add(AISuggestion(conversation_id=conv.id, provider="mock", model="mock-deterministic", intent=analysis.intent, sentiment=analysis.sentiment, urgency=analysis.urgency, summary=analysis.summary, suggested_response=analysis.suggested_response, next_best_action=analysis.next_best_action, recommended_department=analysis.recommended_department, confidence=analysis.confidence, sources=analysis.sources, status="approved" if idx < 3 else "pending"))
-    db.add(AuditLog(user_id=users[0].id, action="seed_demo", model_provider="mock", confidence=1, explanation="Seeded JourneySync demo data."))
+    db.add(AuditLog(organization_id=org.id, user_id=users[0].id, action="seed_demo", model_provider="mock", confidence=1, explanation="Seeded JourneySync demo data."))
     db.commit()
     db.close()
 

@@ -14,6 +14,20 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SignupRequest(BaseModel):
+    organization_name: str = Field(min_length=2, max_length=120)
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+    password: str = Field(min_length=8)
+
+
+class InviteUserRequest(BaseModel):
+    email: EmailStr
+    name: str = Field(min_length=2, max_length=120)
+    role: str = Field(pattern="^(administrator|agent|customer)$")
+    temporary_password: str = Field(min_length=8)
+
+
 class MessageCreate(BaseModel):
     customer_id: str | None = None
     conversation_id: str | None = None

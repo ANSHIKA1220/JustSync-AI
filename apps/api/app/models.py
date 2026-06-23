@@ -20,6 +20,18 @@ class Organization(Base, TimestampMixin):
     __tablename__ = "organizations"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
     name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    plan: Mapped[str] = mapped_column(String(40), default="trial")
+    status: Mapped[str] = mapped_column(String(40), default="active")
+
+
+class Workspace(Base, TimestampMixin):
+    __tablename__ = "workspaces"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(80))
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class User(Base, TimestampMixin):
@@ -69,6 +81,7 @@ class Channel(Base, TimestampMixin):
 class Conversation(Base, TimestampMixin):
     __tablename__ = "conversations"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"))
     channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id"))
     subject: Mapped[str] = mapped_column(String(180))
@@ -96,6 +109,7 @@ class Message(Base, TimestampMixin):
 class SupportTicket(Base, TimestampMixin):
     __tablename__ = "support_tickets"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"))
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"))
     title: Mapped[str] = mapped_column(String(180))
@@ -119,6 +133,7 @@ class AgentAssignment(Base, TimestampMixin):
 class KnowledgeDocument(Base, TimestampMixin):
     __tablename__ = "knowledge_documents"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     title: Mapped[str] = mapped_column(String(180))
     content: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="indexed")
@@ -173,6 +188,7 @@ class CustomerMetric(Base, TimestampMixin):
 class AuditLog(Base, TimestampMixin):
     __tablename__ = "audit_logs"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), nullable=True, index=True)
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(120))
     model_provider: Mapped[str] = mapped_column(String(80), default="mock")
@@ -185,6 +201,7 @@ class AuditLog(Base, TimestampMixin):
 class RoutingRule(Base, TimestampMixin):
     __tablename__ = "routing_rules"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid_str)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     intent: Mapped[str | None] = mapped_column(String(80), nullable=True)
     sentiment: Mapped[str | None] = mapped_column(String(40), nullable=True)

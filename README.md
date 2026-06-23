@@ -21,6 +21,8 @@ Frontend: http://localhost:3000
 Backend API: http://localhost:8000  
 FastAPI docs: http://localhost:8000/docs
 
+Deployment notes and the production readiness checklist live in [docs/deployment.md](docs/deployment.md). The enterprise SaaS rebuild roadmap lives in [docs/enterprise-saas-roadmap.md](docs/enterprise-saas-roadmap.md). Start production environment configuration from `.env.production.example`.
+
 Local backend without Docker:
 
 ```bash
@@ -108,6 +110,7 @@ The backend defines SQLAlchemy models for users, organizations, customers, profi
 - JWT access tokens protect API routes.
 - Role-based dependencies restrict administrator and agent actions.
 - CORS is environment-configured.
+- Production mode refuses demo JWT secrets, SQLite databases, and demo seed data.
 - AI endpoints use simple in-memory rate limiting for prototype safety.
 - Secrets are read from environment variables and are not committed.
 

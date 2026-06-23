@@ -165,12 +165,45 @@ class OpenAICompatibleProvider(JSONLLMProvider):
         return self.parse_analysis(content, sources)
 
 
+class GeminiAIProvider(JSONLLMProvider):
+    name = "gemini"
+
+    def __init__(self) -> None:
+        self.model = settings.gemini_model
+
+    async def analyze(
+        self,
+        messages: list[dict[str, str]],
+        sources: list[dict[str, Any]],
+        customer_context: dict[str, Any] | None = None,
+    ) -> AIAnalysis:
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is not configured")
+        prompt = self.build_prompt(messages, sources, customer_context)
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(
+                f"{settings.gemini_base_url.rstrip('/')}/models/{self.model}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key},
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2},
+                },
+            )
+            response.raise_for_status()
+        candidates = response.json().get("candidates", [])
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        content = "\n".join(part.get("text", "") for part in parts)
+        return self.parse_analysis(content, sources)
+
+
 def get_ai_provider() -> AIProvider:
     provider = settings.ai_provider.lower()
     if provider == "ollama":
         return OllamaAIProvider()
     if provider == "openai":
         return OpenAICompatibleProvider()
+    if provider == "gemini":
+        return GeminiAIProvider()
     return MockAIProvider()
 
 
@@ -201,6 +234,12 @@ def get_provider_status() -> dict[str, Any]:
     elif configured == "openai":
         status["model"] = settings.openai_model
         if not settings.openai_api_key:
+            status["active_provider"] = "mock"
+            status["fallback_active"] = True
+            status["model"] = "mock-deterministic"
+    elif configured == "gemini":
+        status["model"] = settings.gemini_model
+        if not settings.gemini_api_key:
             status["active_provider"] = "mock"
             status["fallback_active"] = True
             status["model"] = "mock-deterministic"

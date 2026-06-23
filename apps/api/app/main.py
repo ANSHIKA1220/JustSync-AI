@@ -1,15 +1,18 @@
+import re
 from datetime import datetime
 from time import time
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .adapters import ADAPTERS
 from .ai_providers import get_provider_status
-from .auth import create_access_token, current_user, require_roles, verify_password
+from .auth import create_access_token, current_user, hash_password, require_roles, verify_password
 from .config import settings
-from .database import Base, engine, get_db
+from .database import get_db
 from .models import (
     AISuggestion,
     AuditLog,
@@ -18,25 +21,20 @@ from .models import (
     Customer,
     KnowledgeDocument,
     Message,
+    Organization,
     RoutingRule,
     SupportTicket,
     User,
+    Workspace,
 )
-from .schemas import KnowledgeCreate, LoginRequest, MessageCreate, SuggestionDecision
+from .schemas import InviteUserRequest, KnowledgeCreate, LoginRequest, MessageCreate, SignupRequest, SuggestionDecision
 from .seed import seed_database
 from .services import analytics_summary, analyze_text, chunk_document, create_ai_suggestion, route_case, search_knowledge
 
-Base.metadata.create_all(bind=engine)
 app = FastAPI(title="JourneySync AI API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_url,
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3100",
-        "http://127.0.0.1:3100",
-    ],
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,6 +48,25 @@ def serialize(obj):
         if isinstance(value, datetime):
             data[key] = value.isoformat()
     return data
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "workspace"
+
+
+def tenant_conversation(db: Session, conversation_id: str, user: User) -> Conversation:
+    conv = db.get(Conversation, conversation_id)
+    if not conv or conv.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
+def tenant_ticket(db: Session, ticket_id: str, user: User) -> SupportTicket:
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket or ticket.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket
 
 
 def ai_rate_limit(request: Request):
@@ -67,6 +84,15 @@ def health():
     return {"status": "healthy", **get_provider_status()}
 
 
+@app.get("/ready")
+def ready(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database is not ready") from exc
+    return {"status": "ready"}
+
+
 @app.post("/auth/login")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
@@ -75,25 +101,83 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     return {"access_token": create_access_token(user), "token_type": "bearer", "user": serialize(user)}
 
 
+@app.post("/auth/signup")
+def signup(payload: SignupRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == payload.email).first():
+        raise HTTPException(status_code=409, detail="Email is already registered")
+    base_slug = slugify(payload.organization_name)
+    slug = base_slug
+    suffix = 2
+    while db.query(Organization).filter(Organization.slug == slug).first():
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    org = Organization(name=payload.organization_name, slug=slug, plan="trial")
+    db.add(org)
+    db.flush()
+    db.add(Workspace(organization_id=org.id, name="Customer Operations", slug="customer-operations", is_default=True))
+    user = User(
+        organization_id=org.id,
+        email=payload.email,
+        name=payload.name,
+        role="administrator",
+        hashed_password=hash_password(payload.password),
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Could not create organization") from exc
+    return {"access_token": create_access_token(user), "token_type": "bearer", "user": serialize(user), "organization": serialize(org)}
+
+
 @app.get("/auth/me")
 def me(user: User = Depends(current_user)):
     return serialize(user)
 
 
+@app.get("/organization")
+def organization(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    org = db.get(Organization, user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    data = serialize(org)
+    data["workspaces"] = [serialize(w) for w in db.query(Workspace).filter(Workspace.organization_id == org.id).all()]
+    return data
+
+
 @app.get("/users")
-def users(db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
-    return [serialize(u) for u in db.query(User).all()]
+def users(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    return [serialize(u) for u in db.query(User).filter(User.organization_id == user.organization_id).all()]
+
+
+@app.post("/users/invite")
+def invite_user(payload: InviteUserRequest, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    if db.query(User).filter(User.email == payload.email).first():
+        raise HTTPException(status_code=409, detail="Email is already registered")
+    invited = User(
+        organization_id=user.organization_id,
+        email=payload.email,
+        name=payload.name,
+        role=payload.role,
+        hashed_password=hash_password(payload.temporary_password),
+    )
+    db.add(invited)
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="user_invited", explanation=f"Invited {payload.email} as {payload.role}."))
+    db.commit()
+    db.refresh(invited)
+    return serialize(invited)
 
 
 @app.get("/customers")
-def customers(db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return [serialize(c) for c in db.query(Customer).all()]
+def customers(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return [serialize(c) for c in db.query(Customer).filter(Customer.organization_id == user.organization_id).all()]
 
 
 @app.get("/customers/{customer_id}")
-def customer_detail(customer_id: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
+def customer_detail(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     customer = db.get(Customer, customer_id)
-    if not customer:
+    if not customer or customer.organization_id != user.organization_id:
         raise HTTPException(status_code=404, detail="Customer not found")
     data = serialize(customer)
     data["profile"] = serialize(customer.profile) if customer.profile else None
@@ -101,11 +185,11 @@ def customer_detail(customer_id: str, db: Session = Depends(get_db), _: User = D
 
 
 @app.get("/customers/{customer_id}/timeline")
-def customer_timeline(customer_id: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
+def customer_timeline(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     customer = db.get(Customer, customer_id)
-    if not customer:
+    if not customer or customer.organization_id != user.organization_id:
         raise HTTPException(status_code=404, detail="Customer not found")
-    conversations = db.query(Conversation).filter(Conversation.customer_id == customer_id).all()
+    conversations = db.query(Conversation).filter(Conversation.customer_id == customer_id, Conversation.organization_id == user.organization_id).all()
     events = []
     for conv in conversations:
         for msg in conv.messages:
@@ -124,9 +208,9 @@ def conversations(
     sentiment: str = "",
     priority: str = "",
     db: Session = Depends(get_db),
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
 ):
-    rows = db.query(Conversation).all()
+    rows = db.query(Conversation).filter(Conversation.organization_id == user.organization_id).all()
     data = []
     for conv in rows:
         if q and q.lower() not in (conv.subject + conv.customer.name + conv.customer.email).lower():
@@ -146,10 +230,8 @@ def conversations(
 
 
 @app.get("/conversations/{conversation_id}")
-def conversation_detail(conversation_id: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
-    conv = db.get(Conversation, conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+def conversation_detail(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    conv = tenant_conversation(db, conversation_id, user)
     data = serialize(conv)
     data["customer"] = serialize(conv.customer)
     data["profile"] = serialize(conv.customer.profile) if conv.customer.profile else None
@@ -164,12 +246,15 @@ def conversation_detail(conversation_id: str, db: Session = Depends(get_db), _: 
 def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     adapter = ADAPTERS.get(payload.channel, ADAPTERS["web_chat"])
     normalized = adapter.receive_message(payload.model_dump())
-    conv = db.get(Conversation, payload.conversation_id) if payload.conversation_id else None
+    conv = tenant_conversation(db, payload.conversation_id, user) if payload.conversation_id else None
     if not conv:
         if not payload.customer_id:
             raise HTTPException(status_code=400, detail="customer_id or conversation_id is required")
+        customer = db.get(Customer, payload.customer_id)
+        if not customer or customer.organization_id != user.organization_id:
+            raise HTTPException(status_code=404, detail="Customer not found")
         channel = db.query(Channel).filter(Channel.name == normalized.channel).first()
-        conv = Conversation(customer_id=payload.customer_id, channel_id=channel.id, subject="New simulated interaction", unread=True)
+        conv = Conversation(organization_id=user.organization_id, customer_id=payload.customer_id, channel_id=channel.id, subject="New simulated interaction", unread=True)
         db.add(conv)
         db.flush()
     msg = Message(
@@ -185,43 +270,39 @@ def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: 
     analysis = analyze_text(db, normalized.body, conv.customer)
     conv.sentiment = analysis.sentiment
     conv.priority = "high" if analysis.urgency == "high" else conv.priority
-    db.add(AuditLog(user_id=user.id, action="message_created", explanation=f"Normalized {normalized.channel} message."))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="message_created", explanation=f"Normalized {normalized.channel} message."))
     db.commit()
     return {"conversation_id": conv.id, "message": serialize(msg), "analysis": analysis.model_dump()}
 
 
 @app.post("/tickets/{ticket_id}/resolve")
 def resolve_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
-    ticket = db.get(SupportTicket, ticket_id)
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket = tenant_ticket(db, ticket_id, user)
     ticket.status = "resolved"
-    db.add(AuditLog(user_id=user.id, action="ticket_resolved", explanation=ticket.title))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_resolved", explanation=ticket.title))
     db.commit()
     return serialize(ticket)
 
 
 @app.post("/tickets/{ticket_id}/escalate")
 def escalate_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
-    ticket = db.get(SupportTicket, ticket_id)
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+    ticket = tenant_ticket(db, ticket_id, user)
     ticket.escalated = True
     ticket.priority = "high"
-    db.add(AuditLog(user_id=user.id, action="ticket_escalated", explanation=ticket.title, human_decision="escalated"))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_escalated", explanation=ticket.title, human_decision="escalated"))
     db.commit()
     return serialize(ticket)
 
 
 @app.get("/analytics/summary")
-def analytics(db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return analytics_summary(db)
+def analytics(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return analytics_summary(db, user.organization_id)
 
 
 @app.get("/knowledge")
-def knowledge(db: Session = Depends(get_db), _: User = Depends(current_user)):
+def knowledge(db: Session = Depends(get_db), user: User = Depends(current_user)):
     docs = []
-    for doc in db.query(KnowledgeDocument).all():
+    for doc in db.query(KnowledgeDocument).filter(KnowledgeDocument.organization_id == user.organization_id).all():
         item = serialize(doc)
         item["chunk_count"] = len(doc.chunks)
         docs.append(item)
@@ -229,8 +310,8 @@ def knowledge(db: Session = Depends(get_db), _: User = Depends(current_user)):
 
 
 @app.post("/knowledge")
-def add_knowledge(payload: KnowledgeCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
-    doc = KnowledgeDocument(title=payload.title, content=payload.content, status="pending")
+def add_knowledge(payload: KnowledgeCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    doc = KnowledgeDocument(organization_id=user.organization_id, title=payload.title, content=payload.content, status="pending")
     db.add(doc)
     db.commit()
     db.refresh(doc)
@@ -239,9 +320,9 @@ def add_knowledge(payload: KnowledgeCreate, db: Session = Depends(get_db), _: Us
 
 
 @app.put("/knowledge/{doc_id}")
-def update_knowledge(doc_id: str, payload: KnowledgeCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
+def update_knowledge(doc_id: str, payload: KnowledgeCreate, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
     doc = db.get(KnowledgeDocument, doc_id)
-    if not doc:
+    if not doc or doc.organization_id != user.organization_id:
         raise HTTPException(status_code=404, detail="Document not found")
     doc.title = payload.title
     doc.content = payload.content
@@ -250,9 +331,9 @@ def update_knowledge(doc_id: str, payload: KnowledgeCreate, db: Session = Depend
 
 
 @app.delete("/knowledge/{doc_id}")
-def delete_knowledge(doc_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
+def delete_knowledge(doc_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
     doc = db.get(KnowledgeDocument, doc_id)
-    if not doc:
+    if not doc or doc.organization_id != user.organization_id:
         raise HTTPException(status_code=404, detail="Document not found")
     db.delete(doc)
     db.commit()
@@ -260,13 +341,13 @@ def delete_knowledge(doc_id: str, db: Session = Depends(get_db), _: User = Depen
 
 
 @app.get("/knowledge/search")
-def knowledge_search(q: str, db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return search_knowledge(db, q)
+def knowledge_search(q: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return search_knowledge(db, q, user.organization_id)
 
 
 @app.post("/knowledge/reindex")
-def reindex(db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
-    for doc in db.query(KnowledgeDocument).all():
+def reindex(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    for doc in db.query(KnowledgeDocument).filter(KnowledgeDocument.organization_id == user.organization_id).all():
         chunk_document(db, doc)
     return {"ok": True}
 
@@ -279,9 +360,7 @@ def ai_analyze(payload: MessageCreate, db: Session = Depends(get_db), _: User = 
 
 @app.post("/ai/conversations/{conversation_id}/suggest", dependencies=[Depends(ai_rate_limit)])
 def ai_suggest(conversation_id: str, db: Session = Depends(get_db), _: User = Depends(require_roles("administrator", "agent"))):
-    conv = db.get(Conversation, conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = tenant_conversation(db, conversation_id, _)
     return serialize(create_ai_suggestion(db, conv))
 
 
@@ -290,10 +369,12 @@ def approve_suggestion(suggestion_id: str, payload: SuggestionDecision, db: Sess
     suggestion = db.get(AISuggestion, suggestion_id)
     if not suggestion:
         raise HTTPException(status_code=404, detail="Suggestion not found")
+    tenant_conversation(db, suggestion.conversation_id, user)
     suggestion.status = "approved"
     suggestion.edited_response = payload.edited_response or suggestion.suggested_response
     db.add(Message(conversation_id=suggestion.conversation_id, sender_type="agent", body=suggestion.edited_response, channel_name="agent_console"))
     db.add(AuditLog(
+        organization_id=user.organization_id,
         user_id=user.id,
         action="ai_suggestion_approved",
         model_provider=suggestion.provider,
@@ -311,20 +392,21 @@ def reject_suggestion(suggestion_id: str, db: Session = Depends(get_db), user: U
     suggestion = db.get(AISuggestion, suggestion_id)
     if not suggestion:
         raise HTTPException(status_code=404, detail="Suggestion not found")
+    tenant_conversation(db, suggestion.conversation_id, user)
     suggestion.status = "rejected"
-    db.add(AuditLog(user_id=user.id, action="ai_suggestion_rejected", model_provider=suggestion.provider, confidence=suggestion.confidence, human_decision="rejected", explanation="Agent rejected AI suggestion."))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ai_suggestion_rejected", model_provider=suggestion.provider, confidence=suggestion.confidence, human_decision="rejected", explanation="Agent rejected AI suggestion."))
     db.commit()
     return serialize(suggestion)
 
 
 @app.get("/routing/rules")
-def routing_rules(db: Session = Depends(get_db), _: User = Depends(current_user)):
-    return [serialize(r) for r in db.query(RoutingRule).all()]
+def routing_rules(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return [serialize(r) for r in db.query(RoutingRule).filter(RoutingRule.organization_id == user.organization_id).all()]
 
 
 @app.post("/routing/rules")
-def create_rule(rule: dict, db: Session = Depends(get_db), _: User = Depends(require_roles("administrator"))):
-    obj = RoutingRule(**rule)
+def create_rule(rule: dict, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    obj = RoutingRule(**rule, organization_id=user.organization_id)
     db.add(obj)
     db.commit()
     return serialize(obj)
@@ -332,19 +414,17 @@ def create_rule(rule: dict, db: Session = Depends(get_db), _: User = Depends(req
 
 @app.post("/routing/decide/{conversation_id}")
 def routing_decide(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
-    conv = db.get(Conversation, conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = tenant_conversation(db, conversation_id, user)
     analysis = analyze_text(db, "\n".join(m.body for m in conv.messages), conv.customer)
     decision = route_case(db, conv, analysis)
-    db.add(AuditLog(user_id=user.id, action="routing_decision", explanation=decision.explanation, confidence=analysis.confidence))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="routing_decision", explanation=decision.explanation, confidence=analysis.confidence))
     db.commit()
     return decision.model_dump()
 
 
 @app.get("/audit")
-def audit(db: Session = Depends(get_db), _: User = Depends(require_roles("administrator", "agent"))):
-    return [serialize(a) for a in db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(100)]
+def audit(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
+    return [serialize(a) for a in db.query(AuditLog).filter(AuditLog.organization_id == user.organization_id).order_by(AuditLog.created_at.desc()).limit(100)]
 
 
 @app.post("/demo/reset")
@@ -355,16 +435,18 @@ def reset_demo(db: Session = Depends(get_db), _: User = Depends(require_roles("a
 
 @app.post("/demo/run-scenario")
 def run_scenario(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
-    customer = db.query(Customer).filter(Customer.email == "priya.shah@example.com").first()
+    customer = db.query(Customer).filter(Customer.email == "priya.shah@example.com", Customer.organization_id == user.organization_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Demo customer not found")
     channel = db.query(Channel).filter(Channel.name == "email").first()
-    conv = Conversation(customer_id=customer.id, channel_id=channel.id, subject="Damaged product after delayed delivery", priority="high", sentiment="negative", unread=True, sla_risk=True)
+    conv = Conversation(organization_id=user.organization_id, customer_id=customer.id, channel_id=channel.id, subject="Damaged product after delayed delivery", priority="high", sentiment="negative", unread=True, sla_risk=True)
     db.add(conv)
     db.flush()
     db.add(Message(conversation_id=conv.id, sender_type="customer", body="My delayed order finally arrived today, but the espresso machine is damaged. I am really upset and need an urgent replacement.", channel_name="email"))
-    ticket = SupportTicket(conversation_id=conv.id, customer_id=customer.id, title=conv.subject, priority="high", department="Logistics and Returns", escalated=True, channel_name="email", first_response_minutes=6, resolution_minutes=0)
+    ticket = SupportTicket(organization_id=user.organization_id, conversation_id=conv.id, customer_id=customer.id, title=conv.subject, priority="high", department="Logistics and Returns", escalated=True, channel_name="email", first_response_minutes=6, resolution_minutes=0)
     db.add(ticket)
     db.commit()
     suggestion = create_ai_suggestion(db, conv)
-    db.add(AuditLog(user_id=user.id, action="guided_demo_scenario", model_provider=settings.ai_provider, confidence=suggestion.confidence, retrieved_sources=suggestion.sources, explanation="Created damaged-product escalation scenario."))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="guided_demo_scenario", model_provider=settings.ai_provider, confidence=suggestion.confidence, retrieved_sources=suggestion.sources, explanation="Created damaged-product escalation scenario."))
     db.commit()
     return {"conversation_id": conv.id, "suggestion_id": suggestion.id}

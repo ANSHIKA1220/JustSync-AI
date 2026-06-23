@@ -24,7 +24,11 @@ describe("frontend smoke", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       const payload = url.includes("/health")
-        ? { status: "healthy", configured_provider: "ollama", active_provider: "mock", fallback_active: true, model: "mock-deterministic", ollama_available: false, database_mode: "sqlite" }
+        ? { status: "healthy", configured_provider: "gemini", active_provider: "mock", fallback_active: true, model: "mock-deterministic", ollama_available: false, database_mode: "sqlite" }
+        : url.includes("/organization")
+          ? { id: "o1", name: "JourneySync Demo Retail", slug: "journeysync-demo-retail", plan: "enterprise_trial", status: "active", workspaces: [{ id: "w1", organization_id: "o1", name: "Customer Operations", slug: "customer-operations", is_default: true }] }
+          : url.endsWith("/users")
+            ? [{ id: "u1", email: "agent@journeysync.demo", name: "Sam Support", role: "agent" }]
         : url.includes("/analytics/summary")
           ? { active_conversations: 11, open_tickets: 8, avg_first_response_time: 12.9, ai_acceptance_rate: 33.3, customer_satisfaction: 82, escalation_rate: 14, repeat_contact_rate: 37.5, sla_compliance: 91, channel_distribution: [], sentiment_trend: [], ticket_volume: [], high_risk_customers: [], recent_escalations: [] }
           : url.includes("/customers/")

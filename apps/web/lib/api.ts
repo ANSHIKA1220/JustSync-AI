@@ -1,10 +1,12 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export type User = { id: string; email: string; name: string; role: "administrator" | "agent" | "customer" };
+export type Workspace = { id: string; organization_id: string; name: string; slug: string; is_default: boolean };
+export type Organization = { id: string; name: string; slug: string; plan: string; status: string; workspaces: Workspace[] };
 export type HealthStatus = {
   status: string;
-  configured_provider: "mock" | "ollama" | "openai" | string;
-  active_provider: "mock" | "ollama" | "openai" | string;
+  configured_provider: "mock" | "ollama" | "openai" | "gemini" | string;
+  active_provider: "mock" | "ollama" | "openai" | "gemini" | string;
   fallback_active: boolean;
   model: string;
   ollama_available: boolean;
@@ -43,4 +45,18 @@ export async function login(email: string, password: string) {
   localStorage.setItem("journeysync_token", res.access_token);
   localStorage.setItem("journeysync_user", JSON.stringify(res.user));
   return res;
+}
+
+export async function signup(organizationName: string, name: string, email: string, password: string) {
+  const res = await api<{ access_token: string; user: User; organization: Organization }>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ organization_name: organizationName, name, email, password })
+  });
+  localStorage.setItem("journeysync_token", res.access_token);
+  localStorage.setItem("journeysync_user", JSON.stringify(res.user));
+  return res;
+}
+
+export function getOrganization() {
+  return api<Organization>("/organization");
 }

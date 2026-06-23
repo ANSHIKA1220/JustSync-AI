@@ -1,7 +1,7 @@
 "use client";
 
-import { getUser } from "@/lib/api";
-import { BarChart3, BookOpen, Bot, ClipboardList, GitBranch, Inbox, LogOut, Map, MessageSquare, Route, ShieldCheck, UserRound } from "lucide-react";
+import { getOrganization, getUser, type Organization } from "@/lib/api";
+import { BarChart3, BookOpen, Bot, ClipboardList, GitBranch, Inbox, LogOut, Map, MessageSquare, Route, Settings, ShieldCheck, UserRound } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -17,14 +17,20 @@ const nav = [
   { href: "/analytics", label: "Analytics", icon: ClipboardList, roles: ["administrator", "agent"] },
   { href: "/routing", label: "Routing", icon: Route, roles: ["administrator"] },
   { href: "/audit", label: "AI Transparency", icon: ShieldCheck, roles: ["administrator", "agent"] },
+  { href: "/settings", label: "Settings", icon: Settings, roles: ["administrator"] },
   { href: "/simulator", label: "Chat Simulator", icon: MessageSquare, roles: ["administrator", "agent", "customer"] }
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState(getUser());
+  const [organization, setOrganization] = useState<Organization | null>(null);
   const pathname = usePathname();
   const router = useRouter();
-  useEffect(() => setUser(getUser()), []);
+  useEffect(() => {
+    const stored = getUser();
+    setUser(stored);
+    if (stored) getOrganization().then(setOrganization).catch(() => setOrganization(null));
+  }, []);
   const visible = nav.filter((item) => !user || item.roles.includes(user.role));
   return (
     <div className="min-h-screen bg-mist">
@@ -33,6 +39,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="flex size-10 items-center justify-center rounded-md bg-navy text-white"><GitBranch className="size-5" /></span>
           <span><b>JourneySync AI</b><span className="mt-1 block"><AIProviderBadge compact /></span></span>
         </Link>
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
+          <p className="font-semibold text-navy">{organization?.name || "Workspace"}</p>
+          <p className="mt-1 text-slate-500">{organization ? `${organization.plan} · ${organization.status}` : "Loading organization"}</p>
+        </div>
         <nav className="mt-6 space-y-1">
           {visible.map((item) => {
             const Icon = item.icon;
@@ -51,7 +61,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="hidden text-sm text-slate-600 lg:block">AI suggestions require human verification before sending.</div>
           <div className="flex items-center gap-3 text-sm">
             <SystemStatusPopover />
-            <span>{user?.name || "Demo user"}</span>
+            <span>{organization?.name ? `${organization.name} / ` : ""}{user?.name || "Demo user"}</span>
             <button aria-label="Log out" className="rounded-md border border-slate-200 p-2" onClick={() => { localStorage.clear(); router.push("/login"); }}><LogOut className="size-4" /></button>
           </div>
         </header>

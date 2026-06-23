@@ -35,11 +35,14 @@ def chunk_document(db: Session, doc: KnowledgeDocument) -> None:
     db.commit()
 
 
-def search_knowledge(db: Session, query: str, limit: int = 4) -> list[dict]:
+def search_knowledge(db: Session, query: str, organization_id: str | None = None, limit: int = 4) -> list[dict]:
     q_tokens = tokens(query)
     if not q_tokens:
         return []
-    chunks = db.query(KnowledgeChunk).all()
+    chunks_query = db.query(KnowledgeChunk).join(KnowledgeDocument)
+    if organization_id:
+        chunks_query = chunks_query.filter(KnowledgeDocument.organization_id == organization_id)
+    chunks = chunks_query.all()
     doc_count = max(1, len(chunks))
     df = Counter(token for chunk in chunks for token in set(chunk.token_set))
     scored = []
@@ -65,7 +68,7 @@ def run_ai_analysis(messages: list[dict[str, str]], sources: list[dict], custome
 
 
 def analyze_text(db: Session, text: str, customer: Customer | None = None) -> AIAnalysis:
-    sources = search_knowledge(db, text)
+    sources = search_knowledge(db, text, customer.organization_id if customer else None)
     messages = [{"role": "customer", "content": text}]
     customer_context = {
         "loyalty_tier": customer.loyalty_tier,
@@ -82,7 +85,7 @@ def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestio
     customer = conversation.customer
     messages = [{"role": message.sender_type, "content": message.body} for message in conversation.messages[-8:]]
     text = "\n".join(message["content"] for message in messages)
-    sources = search_knowledge(db, text)
+    sources = search_knowledge(db, text, conversation.organization_id)
     customer_context = {
         "loyalty_tier": customer.loyalty_tier,
         "lifetime_value": customer.lifetime_value,
@@ -101,6 +104,7 @@ def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestio
     conversation.priority = "high" if analysis.urgency == "high" else conversation.priority
     db.add(suggestion)
     db.add(AuditLog(
+        organization_id=conversation.organization_id,
         action="ai_suggestion_created",
         model_provider=provider_name,
         confidence=analysis.confidence,
@@ -114,7 +118,7 @@ def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestio
 
 
 def route_case(db: Session, conversation: Conversation, analysis: AIAnalysis) -> RouteDecision:
-    rules = db.query(RoutingRule).all()
+    rules = db.query(RoutingRule).filter(RoutingRule.organization_id == conversation.organization_id).all()
     customer = conversation.customer
     for rule in rules:
         checks = [
@@ -130,11 +134,23 @@ def route_case(db: Session, conversation: Conversation, analysis: AIAnalysis) ->
     return RouteDecision(department=analysis.recommended_department, explanation="Used AI recommended department.", matched_rule=None)
 
 
-def analytics_summary(db: Session) -> dict:
-    tickets = db.query(SupportTicket).all()
-    conversations = db.query(Conversation).all()
-    suggestions = db.query(AISuggestion).all()
-    sentiments = db.query(SentimentRecord).all()
+def analytics_summary(db: Session, organization_id: str | None = None) -> dict:
+    tickets_query = db.query(SupportTicket)
+    conversations_query = db.query(Conversation)
+    sentiments_query = db.query(SentimentRecord).join(Customer, Customer.id == SentimentRecord.customer_id)
+    customers_query = db.query(Customer)
+    if organization_id:
+        tickets_query = tickets_query.filter(SupportTicket.organization_id == organization_id)
+        conversations_query = conversations_query.filter(Conversation.organization_id == organization_id)
+        sentiments_query = sentiments_query.filter(Customer.organization_id == organization_id)
+        customers_query = customers_query.filter(Customer.organization_id == organization_id)
+    tickets = tickets_query.all()
+    conversations = conversations_query.all()
+    suggestions = db.query(AISuggestion).join(Conversation, Conversation.id == AISuggestion.conversation_id)
+    if organization_id:
+        suggestions = suggestions.filter(Conversation.organization_id == organization_id)
+    suggestions = suggestions.all()
+    sentiments = sentiments_query.all()
     total_tickets = max(1, len(tickets))
     accepted = len([s for s in suggestions if s.status == "approved"])
     by_channel = defaultdict(int)
@@ -146,7 +162,7 @@ def analytics_summary(db: Session) -> dict:
         "open_tickets": len([t for t in tickets if t.status == "open"]),
         "avg_first_response_time": round(sum(t.first_response_minutes for t in tickets) / total_tickets, 1),
         "avg_resolution_time": round(sum(t.resolution_minutes for t in tickets) / total_tickets, 1),
-        "customer_satisfaction": round((db.query(func.avg(Customer.satisfaction_score)).scalar() or 0), 1),
+        "customer_satisfaction": round((customers_query.with_entities(func.avg(Customer.satisfaction_score)).scalar() or 0), 1),
         "escalation_rate": round(100 * len([t for t in tickets if t.escalated]) / total_tickets, 1),
         "repeat_contact_rate": 37.5,
         "ai_acceptance_rate": round(100 * accepted / max(1, len(suggestions)), 1),
@@ -157,10 +173,10 @@ def analytics_summary(db: Session) -> dict:
         "ticket_volume": [{"name": f"Week {i+1}", "tickets": 18 + i * 3, "resolved": 14 + i * 2} for i in range(6)],
         "high_risk_customers": [
             {"id": c.id, "name": c.name, "risk": c.churn_risk_score, "tier": c.loyalty_tier}
-            for c in db.query(Customer).order_by(Customer.churn_risk_score.desc()).limit(5)
+            for c in customers_query.order_by(Customer.churn_risk_score.desc()).limit(5)
         ],
         "recent_escalations": [
             {"id": t.id, "title": t.title, "department": t.department, "priority": t.priority}
-            for t in db.query(SupportTicket).filter(SupportTicket.escalated.is_(True)).limit(5)
+            for t in tickets_query.filter(SupportTicket.escalated.is_(True)).limit(5)
         ],
     }
