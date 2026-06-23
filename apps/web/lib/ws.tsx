@@ -170,12 +170,12 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
 
       // 4001 = auth failure.  Do not retry – token is invalid.
       if (ev.code === 4001) {
-        console.debug("[JourneySync WS] Auth rejected (4001) – not reconnecting.");
+        console.debug("[JourneySync AI WS] Auth rejected (4001) – not reconnecting.");
         return;
       }
 
       if (attemptRef.current >= MAX_ATTEMPTS) {
-        console.debug("[JourneySync WS] Max reconnect attempts reached.");
+        console.debug("[JourneySync AI WS] Max reconnect attempts reached.");
         return;
       }
 

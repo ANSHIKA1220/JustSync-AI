@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     ollama_model: str = "mistral"
     frontend_url: str = "http://localhost:3000"
 
+    email_provider: str = "mock"
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_refresh_token: str = ""
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant_id: str = ""
+    microsoft_refresh_token: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"

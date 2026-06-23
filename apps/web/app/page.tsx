@@ -33,7 +33,7 @@ export default function LandingPage() {
         </div>
       </section>
       <section className="mx-auto max-w-7xl px-6 py-10">
-        <Card className="p-5"><b>Demo scenario:</b><span className="ml-2 text-slate-600">Priya starts with a delayed-delivery web chat and later reports a damaged order by email. JourneySync links both interactions and recommends a priority replacement.</span></Card>
+        <Card className="p-5"><b>Demo scenario:</b><span className="ml-2 text-slate-600">Priya starts with a delayed-delivery web chat and later reports a damaged order by email. JourneySync AI links both interactions and recommends a priority replacement.</span></Card>
       </section>
       <section className="mx-auto grid max-w-7xl gap-5 px-6 py-8 md:grid-cols-4">
         {[

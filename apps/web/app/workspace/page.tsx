@@ -175,7 +175,7 @@ export default function WorkspacePage() {
     draftModifiedRef.current = true;
     if (mode === "shorter") setDraft(draft.split(". ").slice(0, 2).join(". "));
     if (mode === "empathetic") setDraft(`I understand how frustrating this is. ${draft}`);
-    if (mode === "formal") setDraft(`Thank you for contacting JourneySync support. ${draft}`);
+    if (mode === "formal") setDraft(`Thank you for contacting JourneySync AI support. ${draft}`);
   }
 
   async function copySuggestion() {
@@ -232,8 +232,17 @@ export default function WorkspacePage() {
         </Card>
         <Card className="p-4">
           {!selected ? <p>Loading workspace</p> : <>
-            <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="text-lg font-bold">{selected.subject}</h2><p className="text-xs text-slate-500">Channel history is preserved across simulated touchpoints.</p></div><div className="flex gap-2"><Badge>{selected.channel.name}</Badge><Badge>{selected.sentiment}</Badge>{selected.sla_risk && <StatusBadge tone="amber">SLA risk</StatusBadge>}</div></div>
-            <div className="mt-4 max-h-[520px] space-y-3 overflow-auto pr-2">{selected.messages.map((m: any) => <div key={m.id} className={`rounded-lg p-3 ${m.sender_type === "agent" ? "ml-8 bg-navy text-white" : "mr-8 bg-slate-100"}`}><p className="text-sm">{m.body}</p><small className="mt-1 block opacity-70">{m.sender_type} - {new Date(m.created_at).toLocaleString()}</small></div>)}</div>
+            <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="text-lg font-bold">{selected.subject}</h2><p className="text-xs text-slate-500">Channel history is preserved across touchpoints.</p></div><div className="flex gap-2"><Badge>{selected.channel.name}</Badge><Badge>{selected.sentiment}</Badge>{selected.sla_risk && <StatusBadge tone="amber">SLA risk</StatusBadge>}</div></div>
+            <div className="mt-4 max-h-[520px] space-y-3 overflow-auto pr-2">{selected.messages.map((m: any) => <div key={m.id} className={`rounded-lg p-3 ${m.sender_type === "agent" ? "ml-8 bg-navy text-white" : "mr-8 bg-slate-100"}`}>
+              {m.metadata_json?.recipients && <div className="mb-2 border-b border-slate-200 pb-2 text-xs opacity-80">
+                <b>Provider:</b> {m.channel_name === "email" ? "Email Integration" : "Standard"}<br />
+                <b>To:</b> {m.metadata_json.recipients.join(", ")}
+                {m.metadata_json.thread_id && <><br /><b>Thread ID:</b> {m.metadata_json.thread_id}</>}
+              </div>}
+              <p className="whitespace-pre-wrap text-sm">{m.body}</p>
+              {m.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{m.attachments.map((a: any) => <Badge key={a.id} className="bg-slate-200 text-slate-800">📎 {a.filename}</Badge>)}</div>}
+              <small className="mt-2 block opacity-70">{m.sender_type} - {new Date(m.created_at).toLocaleString()}</small>
+            </div>)}</div>
             <div className="mt-4 flex gap-2"><Textarea aria-label="Message composer" placeholder="Write a message" value={composer} onChange={(e) => setComposer(e.target.value)} /><Button onClick={sendMessage} disabled={sending || !composer.trim()}><Send className="size-4" /> {sending ? "Sending" : "Send"}</Button></div>
           </>}
         </Card>

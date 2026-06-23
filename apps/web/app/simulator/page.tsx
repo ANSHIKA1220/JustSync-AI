@@ -77,7 +77,7 @@ export default function SimulatorPage() {
         <div className="flex-1 space-y-3 overflow-auto bg-slate-50 p-4">
           {!events.length && <EmptyState title="No interactions yet" description="Send a message to begin this customer journey." />}
           {events.map((event, i) => event.type === "divider" ? <div key={i} className="text-center text-xs font-semibold text-accent">{event.body}</div> : <div key={i} className={`rounded-lg p-3 ${event.sender === "customer" ? "mr-10 bg-white" : "ml-10 bg-navy text-white"}`}><div className="mb-1 flex gap-2"><Badge>{event.channel}</Badge>{event.analysis && <Badge>{event.analysis.intent}</Badge>}</div><p className="text-sm">{event.body}</p><small className="mt-1 block opacity-70">{event.time}</small></div>)}
-          {loading && <div className="ml-10 rounded-lg bg-navy p-3 text-sm text-white"><span className="inline-flex animate-pulse">JourneySync is analyzing intent, retrieving knowledge, and generating a response...</span></div>}
+          {loading && <div className="ml-10 rounded-lg bg-navy p-3 text-sm text-white"><span className="inline-flex animate-pulse">JourneySync AI is analyzing intent, retrieving knowledge, and generating a response...</span></div>}
         </div>
         <div className="border-t border-slate-200 bg-white p-4">
           <div className="mb-3 flex flex-wrap gap-2">{samples.map((sample) => <button key={sample} className="rounded-full bg-blush px-3 py-1 text-xs font-semibold text-accent" onClick={() => setBody(sample)}>{sample}</button>)}</div>

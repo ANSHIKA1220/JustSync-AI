@@ -86,6 +86,7 @@ export function SystemStatusPopover() {
           </div>
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between"><span className="flex items-center gap-2"><Server className="size-4" /> API</span><StatusBadge tone={status?.status === "healthy" ? "green" : "red"}>{status?.status || "unknown"}</StatusBadge></div>
+            <div className="flex items-center justify-between"><span>Email Provider</span><StatusBadge tone={status?.email_provider === "mock" ? "amber" : "green"}>{status?.email_provider === "mock" ? "🟡 Demo Mode" : `🟢 ${status?.email_provider === "gmail" ? "Gmail Connected" : "Outlook Connected"}`}</StatusBadge></div>
             <div className="flex items-center justify-between"><span>Configured</span><span>{status?.configured_provider || "unknown"}</span></div>
             <div className="flex items-center justify-between"><span>Active</span><AIProviderBadge compact /></div>
             <div className="flex items-center justify-between"><span>Model</span><span className="max-w-40 truncate">{status?.model || "-"}</span></div>
