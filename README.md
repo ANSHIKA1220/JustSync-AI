@@ -52,7 +52,8 @@ flowchart LR
   AI --> Mock["Deterministic Mock"]
   AI --> OpenAI["OpenAI-compatible"]
   AI --> Ollama["Ollama"]
-  AI --> RAG["TF-IDF Knowledge Retrieval"]
+  AI --> VectorRAG["ChromaDB Vector RAG"]
+  VectorRAG -->|"init failure or empty index"| KeywordFallback["Keyword / TF-IDF Fallback"]
   API --> Routing["Rules + AI Classification"]
   API --> Audit["Audit Log"]
 ```
@@ -147,10 +148,70 @@ If the WebSocket is unavailable (API offline):
 
 1. Incoming messages are normalized by channel adapters.
 2. The AI service classifies intent, sentiment, urgency, churn explanation, department, next best action, and confidence.
-3. Knowledge documents are chunked and scored with a local token-overlap/IDF-inspired retriever.
-4. Retrieved sources are attached to AI suggestions and displayed to agents.
-5. Agents must approve, edit, or reject AI suggestions before sending.
-6. Every AI and human decision is written to the audit log.
+3. Knowledge documents are chunked, stored in SQLite, and simultaneously indexed in ChromaDB with `sentence-transformers/all-MiniLM-L6-v2` embeddings.
+4. At query time the semantic retriever is tried first; if the vector store is unavailable or returns zero hits, the keyword/TF-IDF retriever runs instead.
+5. Retrieved sources are attached to AI suggestions and displayed to agents with provider badge, similarity score, and retrieval timestamp.
+6. Agents must approve, edit, or reject AI suggestions before sending.
+7. Every AI and human decision is written to the audit log.
+
+## Vector RAG Architecture
+
+### Embedding Model
+
+`sentence-transformers/all-MiniLM-L6-v2` — a 384-dimension, 22 M parameter model optimised for semantic sentence similarity. It runs entirely on CPU and works offline after the first model download (~90 MB from HuggingFace).
+
+### Implementation Stack
+
+| Component | Library | Notes |
+|---|---|---|
+| Embeddings | `sentence-transformers` | Pure Python + pre-built wheels; no C++ compiler needed |
+| Vector search | `numpy` cosine similarity | Brute-force; O(n) per query; adequate for ≤100k chunks |
+| Persistence | numpy `.npy` + JSON files | Zero extra services to operate |
+
+### Storage
+
+| Store | Location | Purpose |
+|---|---|---|
+| SQLite / PostgreSQL | `apps/api/journeysync.db` | Chunk text, token sets, document metadata |
+| Vector files | `apps/api/vector_store_data/` | `embeddings.npy`, `ids.json`, `meta.json` |
+
+The vector store directory can be overridden with the `VECTOR_STORE_PATH` environment variable.
+
+### Collection
+
+`knowledge_chunks` — one 384-dim vector per `KnowledgeChunk`. Metadata stores `document_id` so results can be joined back to SQLite for the document title.
+
+### Fallback Behaviour
+
+```
+chunk_document()  →  write SQLite chunks (always)
+                  →  add_chunks() to vector store (best-effort; warning on failure)
+
+search_knowledge()  →  client = get_client()
+                        if client and client.count() > 0:
+                            semantic cosine search → return provider="chromadb"
+                        else (client None / 0 vectors / exception):
+                            keyword/TF-IDF → return provider="keyword"
+```
+
+All retrieval results share the same response schema regardless of which path ran:
+
+```json
+{
+  "chunk_id":    "uuid",
+  "provider":    "chromadb" | "keyword",
+  "similarity":  0.91,
+  "retrieved_at": "2026-06-23T07:30:00+00:00",
+  "title":       "Damaged Orders Policy",
+  "excerpt":     "First 260 characters of the chunk…"
+}
+```
+
+The `provider` field is `"chromadb"` for semantic results (future-proofing the name for when the project upgrades to a managed vector DB) and `"keyword"` for TF-IDF fallback.
+
+### Source Initialisation
+
+The embedding model is loaded once when `get_client()` is first called (at application startup via the first `/knowledge` or `/messages` request). Subsequent calls reuse the cached singleton.
 
 The UI labels generated text as an AI-generated suggestion and shows a human-verification disclaimer. The system does not claim AI outputs are guaranteed.
 
@@ -232,15 +293,21 @@ Run the app and capture the dashboard, agent workspace, customer 360, and simula
 ## Known Limitations
 
 - External email/social/mobile integrations are simulated by adapters.
-- The default retriever is local keyword similarity so the app works offline.
+- The first request that triggers vector store initialisation will download `all-MiniLM-L6-v2` (~90 MB) from HuggingFace if not already cached; subsequent startups are instant.
+- If `sentence-transformers` is not installed, the application transparently falls back to the keyword retriever with no user-visible degradation.
 - OpenAI-compatible and Ollama modes are implemented with validated JSON output and automatic mock fallback.
+- The brute-force numpy cosine search is O(n) per query; for very large knowledge bases (>100k chunks) consider upgrading to a vector database (pgvector, Qdrant, Weaviate).
+- Vector store files in `vector_store_data/` are not automatically migrated on schema changes; delete the directory to force a full re-index.
 
 ## Future Improvements
 
-- Add pgvector and sentence-transformer embeddings for production retrieval.
+- Add pgvector extension so embeddings live in PostgreSQL alongside relational data.
+- Replace brute-force cosine search with Qdrant or Weaviate for large-scale deployments (>100k chunks).
 - Add real connector credentials and webhook verification.
 - Expand workflow automation, SLAs, and enterprise SSO.
 - Add streaming AI responses and richer observability.
+- Fine-tune or swap the embedding model (e.g. `bge-large-en-v1.5`) for higher retrieval accuracy on support domain text.
+- Add hybrid retrieval (BM25 + dense) with reciprocal rank fusion for the best of both keyword and semantic retrieval.
 
 ## Hackathon Success Metrics
 
