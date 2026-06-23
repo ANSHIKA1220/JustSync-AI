@@ -76,12 +76,13 @@ Render free services can sleep after inactivity. The first request after sleep m
 
 Recommended settings:
 
+- Framework preset: `Next.js (Static HTML Export)`
 - Root directory: `apps/web`
 - Build command: `npm ci && npm run build`
-- Output directory: `.next`
-- Environment variable: `NEXT_PUBLIC_API_URL=https://<your-render-service>.onrender.com`
+- Output directory: `out`
+- Environment variable: `NEXT_PUBLIC_API_URL=https://justsync-ai.onrender.com`
 
-If the Next.js adapter requires a different Cloudflare Pages output mode later, adjust this section after the first deployment test.
+The app has no API routes, middleware, Server Actions, SSR-only data access, or runtime-dependent route handlers, so Cloudflare Pages can deploy it as a static Next.js export. Cloudflare Pages injects `CF_PAGES=1`; `apps/web/next.config.ts` uses that to emit the static `out` directory while keeping the local Docker standalone build unchanged.
 
 ## Release Checklist
 
