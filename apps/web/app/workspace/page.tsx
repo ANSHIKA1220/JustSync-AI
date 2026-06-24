@@ -46,9 +46,9 @@ export default function WorkspacePage() {
   }, [selectedId]);
 
   const loadDetail = useCallback(async (id: string, options: { preserveDraft?: boolean } = {}) => {
-    const [detail, ticketRow, timelineRows, auditRows] = await Promise.all([
+    const [detail, ticketResult, timelineRows, auditRows] = await Promise.all([
       api<any>(`/conversations/${id}`),
-      api<any>(`/conversations/${id}/ticket`),
+      api<any>(`/conversations/${id}/ticket`).catch(() => null),
       api<any>(`/conversations/${id}/timeline`),
       api<any[]>("/audit"),
     ]);
@@ -57,6 +57,13 @@ export default function WorkspacePage() {
       if (!options.preserveDraft || !sameConversation) setDraft(detail.ai_suggestion?.suggested_response || "");
       return detail;
     });
+    const ticketRow = ticketResult || {
+      id: "",
+      status: detail.status || "open",
+      priority: detail.priority || "medium",
+      department: detail.ai_suggestion?.recommended_department || "Customer Care",
+      escalated: detail.sla_risk,
+    };
     setTicket(ticketRow);
     setTeam(ticketRow.department || teams[0]);
     setTimeline(timelineRows.events || []);
@@ -126,27 +133,27 @@ export default function WorkspacePage() {
   }
 
   async function assignTeam() {
-    if (!ticket) return;
+    if (!ticket?.id) return;
     await withAction(`Assigned to ${team}.`, () => api(`/tickets/${ticket.id}/assign-team`, { method: "POST", body: JSON.stringify({ department: team }) }));
   }
 
   async function escalate() {
-    if (!ticket) return;
+    if (!ticket?.id) return;
     await withAction("Ticket escalated to priority handling.", () => api(`/tickets/${ticket.id}/escalate`, { method: "POST", body: "{}" }));
   }
 
   async function markHighPriority() {
-    if (!ticket) return;
+    if (!ticket?.id) return;
     await withAction("Ticket marked high priority.", () => api(`/tickets/${ticket.id}/priority-high`, { method: "POST", body: "{}" }));
   }
 
   async function resolve() {
-    if (!ticket) return;
+    if (!ticket?.id) return;
     await withAction("Ticket resolved and audit event recorded.", () => api(`/tickets/${ticket.id}/resolve`, { method: "POST", body: "{}" }));
   }
 
   async function reopen() {
-    if (!ticket) return;
+    if (!ticket?.id) return;
     await withAction("Ticket reopened and audit event recorded.", () => api(`/tickets/${ticket.id}/reopen`, { method: "POST", body: "{}" }));
   }
 

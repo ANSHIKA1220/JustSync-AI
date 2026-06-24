@@ -70,13 +70,35 @@ def tenant_ticket(db: Session, ticket_id: str, user: User) -> SupportTicket:
 
 
 def ticket_for_conversation(db: Session, conversation_id: str, user: User) -> SupportTicket:
-    tenant_conversation(db, conversation_id, user)
+    conv = tenant_conversation(db, conversation_id, user)
     ticket = db.query(SupportTicket).filter(
         SupportTicket.conversation_id == conversation_id,
         SupportTicket.organization_id == user.organization_id,
     ).first()
     if not ticket:
-        raise HTTPException(status_code=404, detail="Ticket not found")
+        ticket = SupportTicket(
+            organization_id=user.organization_id,
+            conversation_id=conv.id,
+            customer_id=conv.customer_id,
+            title=conv.subject,
+            status=conv.status if conv.status in {"open", "resolved"} else "open",
+            priority=conv.priority,
+            department="Customer Care",
+            first_response_minutes=0,
+            resolution_minutes=0,
+            escalated=conv.sla_risk or conv.priority == "high",
+            channel_name=conv.channel.name if conv.channel else "web_chat",
+        )
+        db.add(ticket)
+        db.add(AuditLog(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            action="ticket_created_from_conversation",
+            human_decision="system",
+            explanation=f"Created a ticket for {conv.subject}.",
+        ))
+        db.commit()
+        db.refresh(ticket)
     return ticket
 
 
