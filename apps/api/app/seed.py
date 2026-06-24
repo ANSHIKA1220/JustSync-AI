@@ -1,4 +1,5 @@
 import argparse
+import secrets
 from datetime import datetime, timedelta
 
 from .auth import hash_password
@@ -149,28 +150,69 @@ def seed_curated_demo_data(db, org: Organization, users: list[User], email_suffi
     db.add(AuditLog(organization_id=org.id, user_id=agent.id, action="seed_demo", model_provider="mock", confidence=1, explanation=f"Seeded curated fictional demo data for {org.name}."))
 
 
+DEMO_ORG_SLUG = "journeysync-demo-retail"
+DEMO_USERS = [
+    ("admin@journeysync.demo", "Avery Admin", "administrator"),
+    ("agent@journeysync.demo", "Sam Support", "agent"),
+    ("customer@journeysync.demo", "Casey Customer", "customer"),
+]
+
+
+def unusable_password_hash() -> str:
+    return hash_password(secrets.token_urlsafe(48))
+
+
+def provision_demo_tenant(db, reset_user_passwords: bool = True) -> Organization:
+    org = db.query(Organization).filter(Organization.slug == DEMO_ORG_SLUG).first()
+    if not org:
+        org = Organization(name="JourneySync Demo Retail", slug=DEMO_ORG_SLUG, plan="enterprise_trial")
+        db.add(org)
+        db.flush()
+    elif org.name != "JourneySync Demo Retail" or org.plan != "enterprise_trial":
+        org.name = "JourneySync Demo Retail"
+        org.plan = "enterprise_trial"
+
+    workspace = db.query(Workspace).filter(
+        Workspace.organization_id == org.id,
+        Workspace.slug == "customer-operations",
+    ).first()
+    if not workspace:
+        db.add(Workspace(organization_id=org.id, name="Customer Operations", slug="customer-operations", is_default=True))
+
+    users = []
+    for email, name, role in DEMO_USERS:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            user = User(
+                organization_id=org.id,
+                email=email,
+                name=name,
+                role=role,
+                hashed_password=unusable_password_hash(),
+            )
+            db.add(user)
+            db.flush()
+        else:
+            user.organization_id = org.id
+            user.name = name
+            user.role = role
+            user.is_active = True
+            if reset_user_passwords:
+                user.hashed_password = unusable_password_hash()
+        users.append(user)
+
+    seed_curated_demo_data(db, org, users)
+    db.commit()
+    return org
+
+
 def seed_database(reset: bool = False) -> None:
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     if reset:
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
-    if db.query(User).first():
-        db.close()
-        return
-    org = Organization(name="JourneySync Demo Retail", slug="journeysync-demo-retail", plan="enterprise_trial")
-    db.add(org)
-    db.flush()
-    db.add(Workspace(organization_id=org.id, name="Customer Operations", slug="customer-operations", is_default=True))
-    users = [
-        User(organization_id=org.id, email="admin@journeysync.demo", name="Avery Admin", role="administrator", hashed_password=hash_password("Admin123!")),
-        User(organization_id=org.id, email="agent@journeysync.demo", name="Sam Support", role="agent", hashed_password=hash_password("Agent123!")),
-        User(organization_id=org.id, email="customer@journeysync.demo", name="Casey Customer", role="customer", hashed_password=hash_password("Customer123!")),
-    ]
-    db.add_all(users)
-    db.flush()
-    seed_curated_demo_data(db, org, users)
-    db.commit()
+    provision_demo_tenant(db, reset_user_passwords=False)
     db.close()
 
 

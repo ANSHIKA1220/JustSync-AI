@@ -1,8 +1,8 @@
 import { test, expect } from "@playwright/test";
 
 test("agent edits and approves an AI suggestion", async ({ page }) => {
-  const login = await page.request.post("http://127.0.0.1:8000/auth/login", {
-    data: { email: "agent@journeysync.demo", password: "Agent123!" }
+  const login = await page.request.post("http://127.0.0.1:8000/auth/demo-login", {
+    data: { role: "agent" }
   });
   expect(login.ok()).toBeTruthy();
   const auth = await login.json();

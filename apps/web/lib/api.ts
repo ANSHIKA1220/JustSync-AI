@@ -59,6 +59,16 @@ export async function login(email: string, password: string) {
   return res;
 }
 
+export async function demoLogin(role: "administrator" | "agent" | "customer") {
+  const res = await api<{ access_token: string; user: User }>("/auth/demo-login", {
+    method: "POST",
+    body: JSON.stringify({ role })
+  });
+  localStorage.setItem("journeysync_token", res.access_token);
+  localStorage.setItem("journeysync_user", JSON.stringify(res.user));
+  return res;
+}
+
 export async function signup(organizationName: string, name: string, email: string, password: string) {
   const res = await api<{ access_token: string; user: User; organization: Organization }>("/auth/signup", {
     method: "POST",

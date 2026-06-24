@@ -28,6 +28,8 @@ describe("frontend smoke", () => {
       const url = String(input);
       const payload = url.includes("/health")
         ? { status: "healthy", configured_provider: "gemini", active_provider: "mock", fallback_active: true, model: "mock-deterministic", ollama_available: false, database_mode: "sqlite" }
+        : url.includes("/auth/demo-login")
+          ? { access_token: "demo-token", user: { id: "u1", email: "agent@journeysync.demo", name: "Sam Support", role: "agent" } }
         : url.includes("/auth/signup")
           ? { access_token: "new-token", user: { id: "u2", email: "admin@acme.example", name: "Acme Admin", role: "administrator" }, organization: { id: "o2", name: "Acme CX", slug: "acme-cx", plan: "trial", status: "active", workspaces: [] } }
         : url.includes("/organization")
@@ -50,11 +52,16 @@ describe("frontend smoke", () => {
     expect(screen.getByText("Support Agent")).toBeInTheDocument();
   });
 
-  it("autofills credentials from a role card", async () => {
+  it("starts demo login from a role card without exposing passwords", async () => {
     render(<LoginPage />);
     await userEvent.click(screen.getByText("Administrator"));
-    expect(screen.getByLabelText("Email")).toHaveValue("admin@journeysync.demo");
-    expect(screen.getByLabelText("Password")).toHaveValue("Admin123!");
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/auth/demo-login"), expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ role: "administrator" })
+      }));
+    });
+    expect(screen.queryByDisplayValue(/123!/)).not.toBeInTheDocument();
   });
 
   it("hides seeded credentials and creates organizations in production mode", async () => {

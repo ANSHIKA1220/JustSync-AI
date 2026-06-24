@@ -21,8 +21,8 @@ def setup_module():
     seed_database(reset=True)
 
 
-def token(email="agent@journeysync.demo", password="Agent123!"):
-    res = client.post("/auth/login", json={"email": email, "password": password})
+def token(role="agent"):
+    res = client.post("/auth/demo-login", json={"role": role})
     assert res.status_code == 200
     return res.json()["access_token"]
 
@@ -36,9 +36,9 @@ def auth_headers(access_token: str):
 
 
 def test_auth_and_role_authorization():
-    assert client.post("/auth/login", json={"email": "agent@journeysync.demo", "password": "bad"}).status_code == 401
+    assert client.post("/auth/demo-login", json={"role": "owner"}).status_code == 422
     assert client.get("/users", headers=headers()).status_code == 403
-    admin = token("admin@journeysync.demo", "Admin123!")
+    admin = token("administrator")
     assert client.get("/users", headers={"Authorization": f"Bearer {admin}"}).status_code == 200
 
 

@@ -14,6 +14,10 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class DemoLoginRequest(BaseModel):
+    role: str = Field(pattern="^(administrator|agent|customer)$")
+
+
 class SignupRequest(BaseModel):
     organization_name: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=2, max_length=120)

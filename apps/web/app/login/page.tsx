@@ -1,11 +1,11 @@
 "use client";
 
 import { Button, Card, Input } from "@/components/ui";
-import { API_URL, login, signup } from "@/lib/api";
+import { API_URL, demoLogin, login, signup } from "@/lib/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { ArrowRight, Building2, Eye, EyeOff, Loader2, UserCog } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
@@ -20,33 +20,40 @@ type LoginValues = z.infer<typeof loginSchema>;
 type SignupValues = z.infer<typeof signupSchema>;
 type AuthMode = "signup" | "signin";
 const creds = [
-  { label: "Administrator", email: "admin@journeysync.demo", password: "Admin123!", description: "Analytics, knowledge, routing, and audit controls" },
-  { label: "Support Agent", email: "agent@journeysync.demo", password: "Agent123!", description: "Unified inbox, AI suggestions, and customer timelines" },
-  { label: "Demo Customer", email: "customer@journeysync.demo", password: "Customer123!", description: "Simulated omnichannel support experience" },
+  { label: "Administrator", role: "administrator" as const, email: "admin@journeysync.demo", description: "Analytics, knowledge, routing, and audit controls" },
+  { label: "Support Agent", role: "agent" as const, email: "agent@journeysync.demo", description: "Unified inbox, AI suggestions, and customer timelines" },
+  { label: "Demo Customer", role: "customer" as const, email: "customer@journeysync.demo", description: "Simulated omnichannel support experience" },
 ];
 
-function demoModeEnabled() {
+function demoModeEnabled(includeBrowserHost = false) {
   if (process.env.NEXT_PUBLIC_DEMO_MODE === "true" || process.env.NEXT_PUBLIC_SEED_DEMO_DATA === "true" || process.env.SEED_DEMO_DATA === "true") return true;
+  if (includeBrowserHost && typeof window !== "undefined" && window.location.hostname.endsWith(".pages.dev")) return true;
   if (process.env.NEXT_PUBLIC_DEMO_MODE === "false" || process.env.NEXT_PUBLIC_SEED_DEMO_DATA === "false" || process.env.SEED_DEMO_DATA === "false") return false;
-  if (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)) return true;
+  if (includeBrowserHost && typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)) return true;
   return API_URL.includes("localhost") || API_URL.includes("127.0.0.1");
 }
 
 export default function LoginPage() {
   const router = useRouter();
-  const demoMode = demoModeEnabled();
-  const [mode, setMode] = useState<AuthMode>(demoMode ? "signin" : "signup");
+  const initialDemoMode = demoModeEnabled();
+  const [demoMode, setDemoMode] = useState(initialDemoMode);
+  const [mode, setMode] = useState<AuthMode>(initialDemoMode ? "signin" : "signup");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const loginForm = useForm<LoginValues>({
     resolver: zodResolver(loginSchema),
-    defaultValues: demoMode ? { email: "agent@journeysync.demo", password: "Agent123!" } : { email: "", password: "" }
+    defaultValues: { email: "", password: "" }
   });
   const signupForm = useForm<SignupValues>({
     resolver: zodResolver(signupSchema),
     defaultValues: { organizationName: "", name: "", email: "", password: "" }
   });
+  useEffect(() => {
+    const enabled = demoModeEnabled(true);
+    setDemoMode(enabled);
+    if (enabled) setMode("signin");
+  }, []);
   async function submitLogin(values: LoginValues) {
     setError("");
     setLoading(true);
@@ -55,6 +62,19 @@ export default function LoginPage() {
       router.push(res.user.role === "customer" ? "/simulator" : "/dashboard");
     } catch {
       setError(demoMode ? "Incorrect credentials. Choose a demo account or re-enter the password." : "Incorrect credentials. Create an organization first, or sign in with an existing administrator account.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  async function launchDemo(role: "administrator" | "agent" | "customer") {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await demoLogin(role);
+      router.push(res.user.role === "customer" ? "/simulator" : "/dashboard");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      setError(message || "Demo login is not available yet. Try again after the backend finishes deploying.");
     } finally {
       setLoading(false);
     }
@@ -83,13 +103,13 @@ export default function LoginPage() {
           <div className="bg-navy p-8 text-white">
             {demoMode ? <UserCog className="mb-6 size-8 text-pink-300" /> : <Building2 className="mb-6 size-8 text-pink-300" />}
             <h1 className="text-3xl font-bold">{demoMode ? "Launch JourneySync AI" : "Create your JourneySync organization"}</h1>
-            <p className="mt-4 text-sm text-slate-200">{demoMode ? "Use one-click seeded credentials for the local demo, or create a fresh organization and load sample data from the workspace." : "Create a clean organization, default workspace, and administrator account. Sample data is loaded only through an explicit in-app action."}</p>
+            <p className="mt-4 text-sm text-slate-200">{demoMode ? "Demo environment — sample accounts only. You can also create a fresh organization and load sample data from the workspace." : "Create a clean organization, default workspace, and administrator account. Sample data is loaded only through an explicit in-app action."}</p>
             {demoMode ? (
               <>
-                <p className="mt-8 text-xs font-semibold uppercase tracking-wide text-pink-200">Use demo account</p>
+                <p className="mt-8 text-xs font-semibold uppercase tracking-wide text-pink-200">Demo environment — sample accounts only</p>
                 <div className="mt-3 space-y-3">
                   {creds.map((cred) => (
-                    <button key={cred.email} type="button" className="focus-ring w-full rounded-md border border-white/15 p-3 text-left text-sm transition hover:bg-white/10" onClick={() => { loginForm.reset({ email: cred.email, password: cred.password }); setMode("signin"); setError(""); }}>
+                    <button key={cred.email} type="button" className="focus-ring w-full rounded-md border border-white/15 p-3 text-left text-sm transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-70" disabled={loading} onClick={() => launchDemo(cred.role)}>
                       <b>{cred.label}</b><span className="block text-slate-300">{cred.email}</span><span className="mt-1 block text-xs text-slate-400">{cred.description}</span>
                     </button>
                   ))}
@@ -126,7 +146,7 @@ export default function LoginPage() {
               </form>
             ) : (
               <form onSubmit={loginForm.handleSubmit(submitLogin)}>
-                {!demoMode && <p className="mb-5 rounded-md bg-amber-50 p-3 text-sm text-amber-800">Create an organization first, then sign in with that administrator account. Each organization sees only its own tenant data.</p>}
+                <p className="mb-5 rounded-md bg-amber-50 p-3 text-sm text-amber-800">{demoMode ? "Use the demo role cards for sample accounts, or sign in manually with an organization you created." : "Create an organization first, then sign in with that administrator account. Each organization sees only its own tenant data."}</p>
                 <label htmlFor="email" className="text-sm font-medium">Email</label>
                 <Input id="email" className="mt-2" autoComplete="email" {...loginForm.register("email")} />
                 {loginForm.formState.errors.email && <p className="mt-2 text-sm text-red-600">{loginForm.formState.errors.email.message}</p>}

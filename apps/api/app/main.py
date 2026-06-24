@@ -27,8 +27,8 @@ from .models import (
     User,
     Workspace,
 )
-from .schemas import InviteUserRequest, KnowledgeCreate, LoginRequest, MessageCreate, SignupRequest, SuggestionDecision, TicketAssignment
-from .seed import ensure_channels, seed_database
+from .schemas import DemoLoginRequest, InviteUserRequest, KnowledgeCreate, LoginRequest, MessageCreate, SignupRequest, SuggestionDecision, TicketAssignment
+from .seed import DEMO_ORG_SLUG, ensure_channels, provision_demo_tenant, seed_database
 from .services import analytics_summary, analyze_text, chunk_document, create_ai_suggestion, route_case, search_knowledge
 
 app = FastAPI(title="JourneySync AI API", version="1.0.0")
@@ -112,6 +112,20 @@ def ai_rate_limit(request: Request):
     rate_buckets[key] = bucket
 
 
+def demo_login_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return settings.environment.lower() != "production"
+    configured = settings.allowed_demo_login_origins
+    if configured and origin in configured:
+        return True
+    return (
+        origin.startswith("http://localhost:")
+        or origin.startswith("http://127.0.0.1:")
+        or origin.endswith(".pages.dev")
+    )
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", **get_provider_status()}
@@ -131,6 +145,30 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"access_token": create_access_token(user), "token_type": "bearer", "user": serialize(user)}
+
+
+@app.post("/auth/demo-login")
+def demo_login(payload: DemoLoginRequest, request: Request, db: Session = Depends(get_db)):
+    if not settings.demo_login_enabled or not demo_login_origin_allowed(request):
+        raise HTTPException(status_code=404, detail="Demo login is not available")
+    org = db.query(Organization).filter(Organization.slug == DEMO_ORG_SLUG).first()
+    if not org:
+        org = provision_demo_tenant(db)
+    user = db.query(User).filter(
+        User.organization_id == org.id,
+        User.role == payload.role,
+        User.email.like("%@journeysync.demo"),
+    ).first()
+    if not user:
+        provision_demo_tenant(db)
+        user = db.query(User).filter(
+            User.organization_id == org.id,
+            User.role == payload.role,
+            User.email.like("%@journeysync.demo"),
+        ).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Demo user not found")
     return {"access_token": create_access_token(user), "token_type": "bearer", "user": serialize(user)}
 
 

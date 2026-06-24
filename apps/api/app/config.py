@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     cors_origins: str = Field(default="")
     seed_demo_data: bool = True
+    demo_login_enabled: bool = True
+    demo_login_origins: str = Field(default="")
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -30,6 +32,10 @@ class Settings(BaseSettings):
             "http://localhost:3100",
             "http://127.0.0.1:3100",
         ]
+
+    @property
+    def allowed_demo_login_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.demo_login_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def validate_production_safety(self):
