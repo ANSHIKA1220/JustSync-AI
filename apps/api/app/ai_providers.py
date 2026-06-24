@@ -37,31 +37,45 @@ class MockAIProvider(AIProvider):
         text = "\n".join(message.get("content", "") for message in messages)
         lower = text.lower()
         intent = "general_support"
-        department = "Customer Care"
+        department = "Account Support"
         if any(w in lower for w in ["refund", "duplicate payment", "charged twice"]):
-            intent, department = "refund_request", "Billing and Returns"
+            intent, department = "refund_request", "Billing"
         elif any(w in lower for w in ["password", "login", "access", "account"]):
             intent, department = "account_access", "Technical Support"
+        elif any(w in lower for w in ["late", "delayed", "tracking", "shipment", "delivery"]):
+            intent, department = "delivery_delay", "Delivery"
         elif any(w in lower for w in ["damaged", "broken", "replacement"]):
-            intent, department = "damaged_order", "Logistics and Returns"
+            intent, department = "technical_issue", "Escalations"
         elif any(w in lower for w in ["cancel", "subscription"]):
-            intent, department = "cancellation_risk", "Retention Team"
+            intent, department = "billing_issue", "Account Support"
         elif any(w in lower for w in ["recommend", "which product"]):
-            intent, department = "product_recommendation", "Sales"
+            intent, department = "general_support", "Account Support"
 
-        sentiment = "negative" if any(w in lower for w in ["angry", "upset", "damaged", "late", "cancel", "broken", "charged twice"]) else "positive" if "thank" in lower else "neutral"
-        urgency = "high" if any(w in lower for w in ["urgent", "today", "angry", "cancel", "damaged", "broken"]) else "medium"
+        sentiment = "angry" if any(w in lower for w in ["angry", "furious"]) else "frustrated" if any(w in lower for w in ["upset", "damaged", "late", "delayed", "cancel", "broken", "charged twice"]) else "positive" if "thank" in lower else "neutral"
+        urgency = "critical" if any(w in lower for w in ["urgent escalation", "legal", "unsafe"]) else "high" if any(w in lower for w in ["urgent", "today", "angry", "cancel", "damaged", "broken", "late", "delayed"]) else "medium"
         tier = (customer_context or {}).get("loyalty_tier", "Standard")
         confidence = 0.91 if intent != "general_support" else 0.72
         action = "Verify order context, acknowledge the issue, apply policy, and keep the customer updated."
-        if intent == "damaged_order":
+        if intent == "delivery_delay":
+            action = "Open a carrier trace, assign Delivery, give the customer a concrete update window, and escalate if the promise date was missed."
+        if intent == "technical_issue":
             action = "Verify order photos if available and initiate priority replacement or return according to damaged-order policy."
+        repeat_contact = len(messages) > 2 or any(w in lower for w in ["again", "follow up", "next day", "still", "continued"])
+        history_summary = customer_context.get("history_summary") if customer_context else ""
+        history_summary = history_summary or f"{tier} customer with preferred channel {(customer_context or {}).get('preferred_channel', 'unknown')} and recent support context."
+        conversation_summary = f"The customer reports {intent.replace('_', ' ')} with {sentiment} sentiment and {urgency} urgency."
+        routing_reason = f"{department} is recommended because intent={intent}, urgency={urgency}, sentiment={sentiment}, and tenant knowledge was checked."
         return AIAnalysis(
             intent=intent,
             sentiment=sentiment,
             urgency=urgency,
+            repeat_contact=repeat_contact,
+            repeat_contact_reason="Multiple messages or follow-up language indicate repeated contact." if repeat_contact else "No clear repeat-contact signal in the assembled context.",
+            customer_history_summary=history_summary,
+            conversation_summary=conversation_summary,
             summary=f"{tier} customer needs help with {intent.replace('_', ' ')}. Sentiment is {sentiment} and urgency is {urgency}.",
             recommended_department=department,
+            routing_reason=routing_reason,
             next_best_action=action,
             churn_risk_explanation=f"Risk is elevated when {sentiment} sentiment combines with recent repeat contact and {tier} loyalty status.",
             suggested_response=(
@@ -83,10 +97,14 @@ class JSONLLMProvider(AIProvider):
         customer_context: dict[str, Any] | None,
     ) -> str:
         return (
-            "You are JourneySync AI, a customer support copilot. Return only valid JSON with these keys: "
-            "intent, sentiment, urgency, summary, recommended_department, next_best_action, "
-            "churn_risk_explanation, suggested_response, confidence. "
-            "Use only non-protected business context for routing. Confidence must be between 0 and 1.\n\n"
+            "You are JourneySync AI, an explainable support decision layer. Return only valid JSON. "
+            "Required keys: intent, sentiment, urgency, repeat_contact, repeat_contact_reason, "
+            "customer_history_summary, conversation_summary, summary, recommended_department, routing_reason, "
+            "next_best_action, churn_risk_explanation, suggested_response, confidence. "
+            "Allowed intent values include delivery_delay, refund_request, billing_issue, account_access, technical_issue, general_support. "
+            "Allowed sentiment values are positive, neutral, frustrated, angry, urgent. "
+            "Allowed urgency values are low, medium, high, critical. "
+            "Use only supplied tenant context and retrieved knowledge. Do not invent external policy. Confidence must be between 0 and 1.\n\n"
             f"Customer context: {json.dumps(customer_context or {}, ensure_ascii=False)}\n"
             f"Retrieved knowledge sources: {json.dumps(sources, ensure_ascii=False)}\n"
             f"Conversation messages: {json.dumps(messages, ensure_ascii=False)}"
@@ -98,6 +116,12 @@ class JSONLLMProvider(AIProvider):
             raise ValueError("LLM response did not contain a JSON object")
         raw = json.loads(match.group(0))
         raw["sources"] = sources
+        raw.setdefault("summary", raw.get("conversation_summary", "AI analysis completed."))
+        raw.setdefault("repeat_contact", False)
+        raw.setdefault("repeat_contact_reason", "")
+        raw.setdefault("customer_history_summary", "")
+        raw.setdefault("conversation_summary", raw["summary"])
+        raw.setdefault("routing_reason", "Recommended from structured analysis and retrieved tenant knowledge.")
         return AIAnalysis.model_validate(raw)
 
 

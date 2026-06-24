@@ -27,8 +27,8 @@ from .models import (
     User,
     Workspace,
 )
-from .schemas import InviteUserRequest, KnowledgeCreate, LoginRequest, MessageCreate, SignupRequest, SuggestionDecision
-from .seed import seed_database
+from .schemas import InviteUserRequest, KnowledgeCreate, LoginRequest, MessageCreate, SignupRequest, SuggestionDecision, TicketAssignment
+from .seed import ensure_channels, seed_database
 from .services import analytics_summary, analyze_text, chunk_document, create_ai_suggestion, route_case, search_knowledge
 
 app = FastAPI(title="JourneySync AI API", version="1.0.0")
@@ -65,6 +65,17 @@ def tenant_conversation(db: Session, conversation_id: str, user: User) -> Conver
 def tenant_ticket(db: Session, ticket_id: str, user: User) -> SupportTicket:
     ticket = db.get(SupportTicket, ticket_id)
     if not ticket or ticket.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return ticket
+
+
+def ticket_for_conversation(db: Session, conversation_id: str, user: User) -> SupportTicket:
+    tenant_conversation(db, conversation_id, user)
+    ticket = db.query(SupportTicket).filter(
+        SupportTicket.conversation_id == conversation_id,
+        SupportTicket.organization_id == user.organization_id,
+    ).first()
+    if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return ticket
 
@@ -115,6 +126,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.add(org)
     db.flush()
     db.add(Workspace(organization_id=org.id, name="Customer Operations", slug="customer-operations", is_default=True))
+    ensure_channels(db)
     user = User(
         organization_id=org.id,
         email=payload.email,
@@ -124,6 +136,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     )
     db.add(user)
     try:
+        db.flush()
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -242,6 +255,17 @@ def conversation_detail(conversation_id: str, db: Session = Depends(get_db), use
     return data
 
 
+@app.get("/conversations/{conversation_id}/timeline")
+def conversation_customer_timeline(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    conv = tenant_conversation(db, conversation_id, user)
+    return customer_timeline(conv.customer_id, db, user)
+
+
+@app.get("/conversations/{conversation_id}/ticket")
+def conversation_ticket(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return serialize(ticket_for_conversation(db, conversation_id, user))
+
+
 @app.post("/messages")
 def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     adapter = ADAPTERS.get(payload.channel, ADAPTERS["web_chat"])
@@ -279,7 +303,7 @@ def create_message(payload: MessageCreate, db: Session = Depends(get_db), user: 
 def resolve_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
     ticket = tenant_ticket(db, ticket_id, user)
     ticket.status = "resolved"
-    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_resolved", explanation=ticket.title))
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_resolved", human_decision="resolved", explanation=ticket.title))
     db.commit()
     return serialize(ticket)
 
@@ -290,6 +314,39 @@ def escalate_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = 
     ticket.escalated = True
     ticket.priority = "high"
     db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_escalated", explanation=ticket.title, human_decision="escalated"))
+    db.commit()
+    return serialize(ticket)
+
+
+@app.post("/tickets/{ticket_id}/priority-high")
+def mark_ticket_high_priority(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
+    ticket = tenant_ticket(db, ticket_id, user)
+    ticket.priority = "high"
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_priority_marked_high", human_decision="priority_changed", explanation=f"{ticket.title} marked high priority."))
+    db.commit()
+    return serialize(ticket)
+
+
+@app.post("/tickets/{ticket_id}/reopen")
+def reopen_ticket(ticket_id: str, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
+    ticket = tenant_ticket(db, ticket_id, user)
+    ticket.status = "open"
+    db.add(AuditLog(organization_id=user.organization_id, user_id=user.id, action="ticket_reopened", human_decision="reopened", explanation=f"{ticket.title} reopened for additional review."))
+    db.commit()
+    return serialize(ticket)
+
+
+@app.post("/tickets/{ticket_id}/assign-team")
+def assign_ticket_team(ticket_id: str, payload: TicketAssignment, db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
+    ticket = tenant_ticket(db, ticket_id, user)
+    ticket.department = payload.department
+    db.add(AuditLog(
+        organization_id=user.organization_id,
+        user_id=user.id,
+        action="ticket_team_assigned",
+        human_decision="assigned",
+        explanation=f"{ticket.title} assigned to {payload.department}.",
+    ))
     db.commit()
     return serialize(ticket)
 
@@ -433,9 +490,45 @@ def reset_demo(db: Session = Depends(get_db), _: User = Depends(require_roles("a
     return {"ok": True}
 
 
+@app.post("/demo/load-sample-data")
+def load_sample_data(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator"))):
+    org = db.get(Organization, user.organization_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    from .seed import seed_curated_demo_data
+
+    before = db.query(Customer).filter(Customer.organization_id == org.id).count()
+    seed_curated_demo_data(db, org, [user], email_suffix=org.slug)
+    db.add(AuditLog(
+        organization_id=org.id,
+        user_id=user.id,
+        action="demo_sample_data_loaded",
+        human_decision="approved",
+        explanation="Loaded fictional, tenant-scoped JourneySync sample data for the current organization.",
+    ))
+    db.commit()
+    after = db.query(Customer).filter(Customer.organization_id == org.id).count()
+    return {"ok": True, "created": max(0, after - before), "organization_id": org.id}
+
+
 @app.post("/demo/run-scenario")
 def run_scenario(db: Session = Depends(get_db), user: User = Depends(require_roles("administrator", "agent"))):
-    customer = db.query(Customer).filter(Customer.email == "priya.shah@example.com", Customer.organization_id == user.organization_id).first()
+    customer = db.query(Customer).filter(
+        Customer.organization_id == user.organization_id,
+        Customer.email.like("ari.vale%"),
+    ).first()
+    if not customer:
+        org = db.get(Organization, user.organization_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        from .seed import seed_curated_demo_data
+
+        seed_curated_demo_data(db, org, [user], email_suffix=org.slug)
+        db.commit()
+        customer = db.query(Customer).filter(
+            Customer.organization_id == user.organization_id,
+            Customer.email.like("ari.vale%"),
+        ).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Demo customer not found")
     channel = db.query(Channel).filter(Channel.name == "email").first()
@@ -443,7 +536,7 @@ def run_scenario(db: Session = Depends(get_db), user: User = Depends(require_rol
     db.add(conv)
     db.flush()
     db.add(Message(conversation_id=conv.id, sender_type="customer", body="My delayed order finally arrived today, but the espresso machine is damaged. I am really upset and need an urgent replacement.", channel_name="email"))
-    ticket = SupportTicket(organization_id=user.organization_id, conversation_id=conv.id, customer_id=customer.id, title=conv.subject, priority="high", department="Logistics and Returns", escalated=True, channel_name="email", first_response_minutes=6, resolution_minutes=0)
+    ticket = SupportTicket(organization_id=user.organization_id, conversation_id=conv.id, customer_id=customer.id, title=conv.subject, priority="high", department="Escalations", escalated=True, channel_name="email", first_response_minutes=6, resolution_minutes=0)
     db.add(ticket)
     db.commit()
     suggestion = create_ai_suggestion(db, conv)

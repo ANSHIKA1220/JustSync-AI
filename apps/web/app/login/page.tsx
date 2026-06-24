@@ -9,11 +9,11 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
-const loginSchema = z.object({ email: z.string().email("Enter a valid email."), password: z.string().min(6, "Password must be at least 6 characters.") });
+const loginSchema = z.object({ email: z.string().trim().email("Enter a valid email."), password: z.string().min(6, "Password must be at least 6 characters.") });
 const signupSchema = z.object({
-  organizationName: z.string().min(2, "Organization name is required."),
-  name: z.string().min(2, "Your name is required."),
-  email: z.string().email("Enter a valid work email."),
+  organizationName: z.string().trim().min(2, "Organization name is required."),
+  name: z.string().trim().min(2, "Your name is required."),
+  email: z.string().trim().email("Enter a valid work email, for example name@example.com."),
   password: z.string().min(8, "Password must be at least 8 characters.")
 });
 type LoginValues = z.infer<typeof loginSchema>;
@@ -28,6 +28,7 @@ const creds = [
 function demoModeEnabled() {
   if (process.env.NEXT_PUBLIC_DEMO_MODE === "true" || process.env.NEXT_PUBLIC_SEED_DEMO_DATA === "true" || process.env.SEED_DEMO_DATA === "true") return true;
   if (process.env.NEXT_PUBLIC_DEMO_MODE === "false" || process.env.NEXT_PUBLIC_SEED_DEMO_DATA === "false" || process.env.SEED_DEMO_DATA === "false") return false;
+  if (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)) return true;
   return API_URL.includes("localhost") || API_URL.includes("127.0.0.1");
 }
 
@@ -60,13 +61,17 @@ export default function LoginPage() {
   }
   async function submitSignup(values: SignupValues) {
     setError("");
+    if (values.email.endsWith("@")) {
+      setError("Enter the full email address after @, for example anshika@example.com.");
+      return;
+    }
     setLoading(true);
     try {
       await signup(values.organizationName, values.name, values.email, values.password);
-      router.push("/dashboard");
+      router.push("/workspace");
     } catch (err) {
       const message = err instanceof Error ? err.message : "";
-      setError(message.includes("already registered") ? "That email is already registered. Sign in instead, or use another work email." : "Could not create the organization. Check the details and try again.");
+      setError(message.includes("already registered") ? "That email is already registered. Sign in instead, or use another work email." : message || "Could not create the organization. Check the details and try again.");
     } finally {
       setLoading(false);
     }
@@ -78,7 +83,7 @@ export default function LoginPage() {
           <div className="bg-navy p-8 text-white">
             {demoMode ? <UserCog className="mb-6 size-8 text-pink-300" /> : <Building2 className="mb-6 size-8 text-pink-300" />}
             <h1 className="text-3xl font-bold">{demoMode ? "Launch JourneySync AI" : "Create your JourneySync organization"}</h1>
-            <p className="mt-4 text-sm text-slate-200">{demoMode ? "Use one-click seeded credentials for the local demo, or create a fresh organization against your API." : "Production databases do not include seeded demo users. Create an organization first; the first user becomes its administrator."}</p>
+            <p className="mt-4 text-sm text-slate-200">{demoMode ? "Use one-click seeded credentials for the local demo, or create a fresh organization and load sample data from the workspace." : "Create a clean organization, default workspace, and administrator account. Sample data is loaded only through an explicit in-app action."}</p>
             {demoMode ? (
               <>
                 <p className="mt-8 text-xs font-semibold uppercase tracking-wide text-pink-200">Use demo account</p>
@@ -93,7 +98,7 @@ export default function LoginPage() {
             ) : (
               <div className="mt-8 rounded-md border border-white/15 bg-white/5 p-4 text-sm text-slate-200">
                 <b className="text-white">New production workspace</b>
-                <p className="mt-2">Signup creates the organization, default workspace, and administrator account through the live API.</p>
+                <p className="mt-2">Signup creates the organization, default workspace, administrator account, and tenant-scoped access context through the live API.</p>
               </div>
             )}
           </div>
@@ -121,7 +126,7 @@ export default function LoginPage() {
               </form>
             ) : (
               <form onSubmit={loginForm.handleSubmit(submitLogin)}>
-                {!demoMode && <p className="mb-5 rounded-md bg-amber-50 p-3 text-sm text-amber-800">No seeded demo accounts are available in production. Create an organization first, then sign in with that administrator account.</p>}
+                {!demoMode && <p className="mb-5 rounded-md bg-amber-50 p-3 text-sm text-amber-800">Create an organization first, then sign in with that administrator account. Each organization sees only its own tenant data.</p>}
                 <label htmlFor="email" className="text-sm font-medium">Email</label>
                 <Input id="email" className="mt-2" autoComplete="email" {...loginForm.register("email")} />
                 {loginForm.formState.errors.email && <p className="mt-2 text-sm text-red-600">{loginForm.formState.errors.email.message}</p>}

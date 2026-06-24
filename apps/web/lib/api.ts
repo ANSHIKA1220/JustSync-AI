@@ -29,9 +29,21 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   headers.set("Content-Type", "application/json");
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: "no-store" });
+  const baseUrl = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)
+    ? "http://127.0.0.1:8000"
+    : API_URL;
+  const res = await fetch(`${baseUrl}${path}`, { ...init, headers, cache: "no-store" });
   if (!res.ok) {
     const detail = await res.text();
+    try {
+      const parsed = JSON.parse(detail);
+      if (typeof parsed.detail === "string") throw new Error(parsed.detail);
+      if (Array.isArray(parsed.detail)) {
+        throw new Error(parsed.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join(" "));
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message && err.message !== detail) throw err;
+    }
     throw new Error(detail || `Request failed: ${res.status}`);
   }
   return res.json() as Promise<T>;

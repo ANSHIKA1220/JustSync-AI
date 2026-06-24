@@ -9,8 +9,9 @@ import { Button, Card, StatusBadge } from "./ui";
 function providerLabel(status?: HealthStatus | null) {
   if (!status) return "Checking AI";
   if (status.fallback_active) return "Mock fallback active";
-  if (status.active_provider === "ollama") return `Ollama · ${status.model}`;
-  if (status.active_provider === "openai") return `OpenAI-compatible · ${status.model}`;
+  if (status.active_provider === "ollama") return `Ollama / ${status.model}`;
+  if (status.active_provider === "openai") return `OpenAI-compatible / ${status.model}`;
+  if (status.active_provider === "gemini") return `Gemini / ${status.model}`;
   return "Mock AI";
 }
 

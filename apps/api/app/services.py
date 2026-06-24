@@ -56,8 +56,10 @@ def search_knowledge(db: Session, query: str, organization_id: str | None = None
     for score, chunk in scored[:limit]:
         results.append({
             "title": chunk.document.title,
+            "source_id": chunk.document.id,
             "chunk_id": chunk.id,
             "score": round(float(score), 3),
+            "snippet": chunk.chunk_text[:260],
             "excerpt": chunk.chunk_text[:260],
         })
     return results
@@ -76,24 +78,60 @@ def analyze_text(db: Session, text: str, customer: Customer | None = None) -> AI
         "satisfaction_score": customer.satisfaction_score,
         "churn_risk_score": customer.churn_risk_score,
         "preferred_channel": customer.preferred_channel,
+        "history_summary": f"{customer.name} is a {customer.loyalty_tier} customer with preferred channel {customer.preferred_channel}.",
     } if customer else None
     analysis, _, _, _ = run_ai_analysis(messages, sources, customer_context)
     return analysis
 
 
-def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestion:
+def assemble_ai_context(db: Session, conversation: Conversation) -> tuple[list[dict[str, str]], list[dict], dict]:
     customer = conversation.customer
-    messages = [{"role": message.sender_type, "content": message.body} for message in conversation.messages[-8:]]
-    text = "\n".join(message["content"] for message in messages)
-    sources = search_knowledge(db, text, conversation.organization_id)
+    customer_conversations = (
+        db.query(Conversation)
+        .filter(Conversation.organization_id == conversation.organization_id, Conversation.customer_id == customer.id)
+        .order_by(Conversation.created_at.asc())
+        .all()
+    )
+    messages: list[dict[str, str]] = []
+    timeline_parts: list[str] = []
+    for item in customer_conversations:
+        for message in item.messages:
+            role = message.sender_type
+            content = f"[{message.channel_name}] {item.subject}: {message.body}"
+            timeline_parts.append(content)
+            if item.id == conversation.id:
+                messages.append({"role": role, "content": content})
+    if not messages:
+        messages = [{"role": message.sender_type, "content": message.body} for message in conversation.messages[-8:]]
+    ticket = db.query(SupportTicket).filter(
+        SupportTicket.organization_id == conversation.organization_id,
+        SupportTicket.conversation_id == conversation.id,
+    ).first()
+    query_text = "\n".join(timeline_parts[-18:] or [message["content"] for message in messages])
+    sources = search_knowledge(db, query_text, conversation.organization_id)
     customer_context = {
+        "customer_name": customer.name,
         "loyalty_tier": customer.loyalty_tier,
         "lifetime_value": customer.lifetime_value,
         "satisfaction_score": customer.satisfaction_score,
         "churn_risk_score": customer.churn_risk_score,
         "preferred_channel": customer.preferred_channel,
+        "recent_purchases": customer.recent_purchases,
+        "tags": customer.tags,
+        "conversation_count": len(customer_conversations),
+        "ticket_status": ticket.status if ticket else "unknown",
+        "ticket_priority": ticket.priority if ticket else conversation.priority,
+        "assigned_department": ticket.department if ticket else "unassigned",
+        "history_summary": f"{customer.name} has {len(customer_conversations)} tenant-scoped conversations across {', '.join(sorted({c.channel.name for c in customer_conversations}))}.",
     }
+    return messages, sources, customer_context
+
+
+def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestion:
+    messages, sources, customer_context = assemble_ai_context(db, conversation)
     analysis, provider_name, model_name, fallback_reason = run_ai_analysis(messages, sources, customer_context)
+    analysis.fallback_active = provider_name == "mock" and fallback_reason is not None
+    analysis.fallback_reason = fallback_reason
     suggestion = AISuggestion(
         conversation_id=conversation.id,
         provider=provider_name,
@@ -110,8 +148,18 @@ def create_ai_suggestion(db: Session, conversation: Conversation) -> AISuggestio
         confidence=analysis.confidence,
         retrieved_sources=analysis.sources,
         human_decision="pending",
-        explanation=f"{analysis.summary} {fallback_reason or ''}".strip(),
+        explanation=f"AI classified {analysis.intent}, {analysis.sentiment} sentiment, {analysis.urgency} urgency. {analysis.routing_reason} {fallback_reason or ''}".strip(),
     ))
+    for source in analysis.sources:
+        db.add(AuditLog(
+            organization_id=conversation.organization_id,
+            action="knowledge_source_referenced",
+            model_provider=provider_name,
+            confidence=analysis.confidence,
+            retrieved_sources=[source],
+            human_decision="system",
+            explanation=f"Knowledge source '{source.get('title', 'Untitled')}' was used for this recommendation.",
+        ))
     db.commit()
     db.refresh(suggestion)
     return suggestion
@@ -154,9 +202,15 @@ def analytics_summary(db: Session, organization_id: str | None = None) -> dict:
     total_tickets = max(1, len(tickets))
     accepted = len([s for s in suggestions if s.status == "approved"])
     by_channel = defaultdict(int)
+    by_status = defaultdict(int)
+    by_customer = defaultdict(int)
     for ticket in tickets:
         by_channel[ticket.channel_name] += 1
-    sentiment_map = {"positive": 1, "neutral": 0, "negative": -1}
+        by_status[ticket.status] += 1
+        by_customer[ticket.customer_id] += 1
+    sentiment_map = {"positive": 1, "neutral": 0, "frustrated": -0.6, "angry": -0.9, "urgent": -0.8, "negative": -1}
+    repeat_customers = len([customer_id for customer_id, count in by_customer.items() if count > 1])
+    customer_count = max(1, len(by_customer))
     return {
         "active_conversations": len([c for c in conversations if c.status == "open"]),
         "open_tickets": len([t for t in tickets if t.status == "open"]),
@@ -164,11 +218,12 @@ def analytics_summary(db: Session, organization_id: str | None = None) -> dict:
         "avg_resolution_time": round(sum(t.resolution_minutes for t in tickets) / total_tickets, 1),
         "customer_satisfaction": round((customers_query.with_entities(func.avg(Customer.satisfaction_score)).scalar() or 0), 1),
         "escalation_rate": round(100 * len([t for t in tickets if t.escalated]) / total_tickets, 1),
-        "repeat_contact_rate": 37.5,
+        "repeat_contact_rate": round(100 * repeat_customers / customer_count, 1),
         "ai_acceptance_rate": round(100 * accepted / max(1, len(suggestions)), 1),
         "avg_sentiment_score": round(sum(sentiment_map.get(s.sentiment, 0) for s in sentiments) / max(1, len(sentiments)), 2),
         "sla_compliance": round(100 * len([c for c in conversations if not c.sla_risk]) / max(1, len(conversations)), 1),
         "channel_distribution": [{"name": k, "value": v} for k, v in by_channel.items()],
+        "ticket_status_distribution": [{"name": k, "value": v} for k, v in by_status.items()],
         "sentiment_trend": [{"name": f"Day {i+1}", "positive": 12+i, "neutral": 8, "negative": max(1, 6-i)} for i in range(7)],
         "ticket_volume": [{"name": f"Week {i+1}", "tickets": 18 + i * 3, "resolved": 14 + i * 2} for i in range(6)],
         "high_risk_customers": [

@@ -22,7 +22,7 @@ const nav = [
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState(getUser());
+  const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
   const pathname = usePathname();
   const router = useRouter();

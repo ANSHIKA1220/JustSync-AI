@@ -21,6 +21,8 @@ Frontend: http://localhost:3000
 Backend API: http://localhost:8000  
 FastAPI docs: http://localhost:8000/docs
 
+Live frontend URL: Cloudflare Pages deployment URL placeholder.  
+Backend readiness: `/ready` on the Render FastAPI service.  
 Deployment notes and the production readiness checklist live in [docs/deployment.md](docs/deployment.md). The enterprise SaaS rebuild roadmap lives in [docs/enterprise-saas-roadmap.md](docs/enterprise-saas-roadmap.md). Start production environment configuration from `.env.production.example`.
 
 Local backend without Docker:
@@ -47,14 +49,13 @@ npm.cmd run dev
 
 ```mermaid
 flowchart LR
-  Browser["Next.js 15 Web App"] --> API["FastAPI REST API"]
+  Browser["Next.js 15 Web App on Cloudflare Pages"] --> API["FastAPI REST API on Render"]
   API --> Auth["JWT + RBAC"]
-  API --> DB[("PostgreSQL / SQLite local")]
+  API --> DB[("Neon PostgreSQL / SQLite local")]
   API --> AI["AI Orchestrator"]
-  AI --> Mock["Deterministic Mock"]
-  AI --> OpenAI["OpenAI-compatible"]
-  AI --> Ollama["Ollama"]
-  AI --> RAG["TF-IDF Knowledge Retrieval"]
+  AI --> Gemini["Gemini"]
+  AI --> Mock["Deterministic Mock Fallback"]
+  AI --> Retrieval["Tenant Keyword Retrieval"]
   API --> Routing["Rules + AI Classification"]
   API --> Audit["Audit Log"]
 ```
@@ -67,18 +68,19 @@ flowchart LR
 - Three-column agent workspace with conversation history, editable AI suggestion, retrieved sources, routing recommendation, approval/rejection controls, escalation, and resolution.
 - Customer 360 profile, journey map, analytics, knowledge base CRUD/search/re-indexing, routing rules, audit/AI transparency, and customer chat simulator.
 - Omnichannel adapters normalize simulated web chat, email, mobile app, social, and in-store interactions.
-- Mock AI mode works without keys; OpenAI-compatible and Ollama providers are included with deterministic mock fallback.
-- RAG fallback uses keyword/TF-IDF-style scoring and stores chunks in the database.
+- Gemini is the primary live AI provider; deterministic mock fallback works without keys and covers provider errors, malformed output, timeout, and test mode.
+- Knowledge retrieval uses tenant-scoped keyword/IDF-style chunk scoring and stores chunks in the database. It does not claim embeddings or vector search.
 - Guided demo scenario creates the damaged-delivery escalation flow and records AI and human actions.
 
 ## AI And RAG Workflow
 
 1. Incoming messages are normalized by channel adapters.
-2. The AI service classifies intent, sentiment, urgency, churn explanation, department, next best action, and confidence.
-3. Knowledge documents are chunked and scored with a local token-overlap/IDF-inspired retriever.
-4. Retrieved sources are attached to AI suggestions and displayed to agents.
-5. Agents must approve, edit, or reject AI suggestions before sending.
-6. Every AI and human decision is written to the audit log.
+2. The AI orchestration service assembles selected conversation context, broader customer timeline, ticket state, and tenant-scoped knowledge candidates.
+3. Gemini or deterministic fallback returns validated structured JSON: intent, sentiment, urgency, repeat-contact signal, summaries, recommended team, routing reason, next-best action, suggested reply, knowledge sources, confidence, and fallback status.
+4. Knowledge documents are chunked and scored with a local token-overlap/IDF-inspired retriever.
+5. Retrieved sources are attached to AI suggestions and displayed to agents.
+6. Agents must approve, edit, reject, assign, escalate, resolve, or reopen; the AI does not send autonomously.
+7. Every AI and human decision is written to the tenant-scoped audit log.
 
 The UI labels generated text as an AI-generated suggestion and shows a human-verification disclaimer. The system does not claim AI outputs are guaranteed.
 
@@ -90,15 +92,13 @@ The default is still safe offline mode:
 AI_PROVIDER=mock
 ```
 
-To test with local Ollama:
+Set `AI_PROVIDER=gemini` and configure `GEMINI_API_KEY` only on the backend service. The backend requests strict JSON from Gemini, validates the result with Pydantic, and falls back to mock AI if Gemini is unavailable, rate-limited, times out, returns malformed output, or is not configured.
 
-```bash
-AI_PROVIDER=ollama
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=mistral
-```
+## Demo Data And Tenant Isolation
 
-The backend calls Ollama at `/api/chat`, requests strict JSON, validates the result with Pydantic, and falls back to mock AI if Ollama is unavailable or returns malformed output. OpenAI-compatible APIs use the same validation path with `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
+Production signup with `SEED_DEMO_DATA=false` creates only an organization, default workspace, administrator account, and tenant-scoped access context. It does not automatically load sample customers. In the Agent Workspace, use **Load Sample Data** to create a fictional, clearly marked sample tenant dataset for the signed-in organization. The guided scenario also loads that fictional data for the active tenant if needed.
+
+Tenant isolation is enforced by organization filters on customers, conversations, tickets, knowledge, analytics, audit, and AI context assembly. Direct API calls for another tenant's records return `404` or tenant-local results only.
 
 ## Data Model Overview
 
@@ -144,15 +144,15 @@ npm.cmd test
 npm.cmd run e2e
 ```
 
-## Demo Walkthrough
+## 5-Minute Prototype Demonstration
 
-1. Log in as `agent@journeysync.demo`.
-2. Open the Agent Workspace.
-3. Choose the high-priority damaged delivery conversation.
-4. Review detected negative sentiment, high urgency, retrieved damaged-order sources, and routing to Logistics and Returns.
-5. Edit the AI-generated response and approve/send it.
-6. Open Audit & AI Transparency to see the approval record.
-7. Use Run Demo Scenario to recreate the end-to-end flow from web delay to email damaged-product escalation.
+1. Open the Cloudflare Pages frontend and sign up for a new organization, or sign in locally with `agent@journeysync.demo`.
+2. Open Agent Workspace and click **Load Sample Data** if the workspace is empty.
+3. Select Ari Vale's delayed-delivery case and point out the unified timeline across web chat, email, mobile app, and support desk.
+4. Review the AI Decision Panel: intent, sentiment, urgency, repeat-contact signal, Gemini/fallback status, route explanation, next-best action, and visible knowledge sources.
+5. Edit the suggested reply, assign Delivery or Escalations, mark high priority, approve the reply, and resolve or reopen the ticket.
+6. Open Audit & AI Transparency to show AI classifications, referenced knowledge, and human approval/action records.
+7. Open Analytics to show tenant-scoped first response time, resolution time, escalation rate, repeat-contact rate, sentiment trend, channel performance, and ticket status distribution.
 
 ## Screenshots
 
@@ -162,7 +162,7 @@ Run the app and capture the dashboard, agent workspace, customer 360, and simula
 
 - External email/social/mobile integrations are simulated by adapters.
 - The default retriever is local keyword similarity so the app works offline.
-- OpenAI-compatible and Ollama modes are implemented with validated JSON output and automatic mock fallback.
+- Gemini mode is implemented with validated JSON output and automatic mock fallback.
 
 ## Future Improvements
 

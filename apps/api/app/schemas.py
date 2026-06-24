@@ -56,17 +56,28 @@ class SuggestionDecision(BaseModel):
     edited_response: str | None = None
 
 
+class TicketAssignment(BaseModel):
+    department: str = Field(min_length=2, max_length=80)
+
+
 class AIAnalysis(BaseModel):
     intent: str
     sentiment: str
     urgency: str
+    repeat_contact: bool = False
+    repeat_contact_reason: str = ""
+    customer_history_summary: str
+    conversation_summary: str
     summary: str
     recommended_department: str
+    routing_reason: str
     next_best_action: str
     churn_risk_explanation: str
     suggested_response: str
     confidence: float = Field(ge=0, le=1)
     sources: list[dict] = Field(default_factory=list)
+    fallback_active: bool = False
+    fallback_reason: str | None = None
 
 
 class RouteDecision(BaseModel):

@@ -1,4 +1,3 @@
-import { AIProviderBadge } from "@/components/provider-status";
 import { Button, Card, StatusBadge } from "@/components/ui";
 import { ArrowDown, ArrowRight, BrainCircuit, Building2, Mail, MessageSquareText, ShieldCheck, Smartphone, Store } from "lucide-react";
 import Link from "next/link";
@@ -16,7 +15,7 @@ export default function LandingPage() {
       <section className="relative overflow-hidden bg-[linear-gradient(120deg,#ffffff,#f6f8fb)] px-6 py-12 md:px-12">
         <div className="mx-auto grid max-w-7xl items-center gap-10 lg:grid-cols-[0.9fr_1.1fr]">
           <div>
-            <div className="mb-4 flex flex-wrap gap-2"><StatusBadge>Local AI ready</StatusBadge><StatusBadge tone="slate">No paid API required</StatusBadge><AIProviderBadge /></div>
+            <div className="mb-4 flex flex-wrap gap-2"><StatusBadge>Local AI ready</StatusBadge><StatusBadge tone="slate">No paid API required</StatusBadge></div>
             <h1 className="max-w-3xl text-5xl font-bold tracking-normal md:text-7xl">JourneySync AI</h1>
             <p className="mt-6 max-w-2xl text-lg text-slate-600">Unify every customer touchpoint into one timeline, detect urgency and churn risk, retrieve policy context, and help agents send verified responses faster.</p>
             <div className="mt-8 flex flex-wrap gap-3"><Link href="/login"><Button>Launch Demo <ArrowRight className="size-4" /></Button></Link><a href="#architecture"><Button className="bg-white text-ink ring-1 ring-slate-200 hover:bg-slate-50">View Architecture <ArrowDown className="size-4" /></Button></a></div>

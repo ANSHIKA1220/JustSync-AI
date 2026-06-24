@@ -113,10 +113,16 @@ def test_signup_invite_and_tenant_isolation():
 
     acme_users = client.get("/users", headers=acme_headers).json()
     assert {u["email"] for u in acme_users} == {"admin@acme.example", "agent@acme.example"}
+    assert client.get("/customers", headers=acme_headers).json() == []
 
     demo_customer = client.get("/customers", headers=headers()).json()[0]
     blocked_customer = client.get(f"/customers/{demo_customer['id']}", headers=acme_headers)
     assert blocked_customer.status_code == 404
+
+    loaded = client.post("/demo/load-sample-data", headers=acme_headers)
+    assert loaded.status_code == 200
+    assert loaded.json()["created"] >= 8
+    assert len(client.get("/customers", headers=acme_headers).json()) >= 8
 
     doc = client.post(
         "/knowledge",
@@ -139,14 +145,15 @@ def test_message_creation_and_ai_validation():
     customer = client.get("/customers", headers=headers()).json()[0]
     res = client.post("/messages", headers=headers(), json={"customer_id": customer["id"], "channel": "email", "body": "This is urgent, my delivered product is damaged."})
     assert res.status_code == 200
-    assert res.json()["analysis"]["intent"] == "damaged_order"
+    assert res.json()["analysis"]["intent"] == "technical_issue"
     assert res.json()["analysis"]["confidence"] <= 1
+    assert "customer_history_summary" in res.json()["analysis"]
 
 
 def test_knowledge_retrieval_fallback():
     res = client.get("/knowledge/search?q=damaged replacement", headers=headers())
     assert res.status_code == 200
-    assert res.json()[0]["title"] in {"Damaged Orders", "Product Returns"}
+    assert res.json()[0]["title"] in {"Damaged Orders", "Product Returns", "Delivery Delay Escalation Policy"}
 
 
 def test_routing_rules_and_analytics():
@@ -166,6 +173,7 @@ def test_human_approval_workflow_and_audit():
     assert res.status_code == 200
     audit = client.get("/audit", headers=headers()).json()
     assert any(item["action"] == "ai_suggestion_approved" for item in audit)
+    assert any(item["action"] in {"knowledge_source_referenced", "ai_suggestion_created"} for item in audit)
 
 
 def test_real_provider_failure_falls_back_to_mock(monkeypatch):
@@ -182,7 +190,7 @@ def test_real_provider_failure_falls_back_to_mock(monkeypatch):
         analysis = analyze_text(db, "My product arrived damaged and this is urgent.", customer)
     finally:
         db.close()
-    assert analysis.intent == "damaged_order"
+    assert analysis.intent == "technical_issue"
     assert analysis.urgency == "high"
 
 
@@ -200,5 +208,5 @@ def test_gemini_provider_missing_key_falls_back_to_mock(monkeypatch):
         analysis = analyze_text(db, "My order arrived broken and I need a replacement today.", customer)
     finally:
         db.close()
-    assert analysis.intent == "damaged_order"
+    assert analysis.intent == "technical_issue"
     assert analysis.urgency == "high"
